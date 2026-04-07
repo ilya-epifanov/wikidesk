@@ -1,0 +1,27 @@
+# Path to the wiki git repo (must contain a wiki/ subdirectory)
+# Relative paths are resolved relative to this config file's directory.
+# wiki_repo = "."
+
+# HTTP bind address (default: 127.0.0.1:3000)
+# bind_address = "127.0.0.1:3000"
+
+# Command for spawning the research agent.
+# The literal "$PROMPT" element is replaced with the rendered prompt.
+# Executed directly (no shell) with wiki_repo as the working directory.
+agent_command = ["claude", "-p", "$PROMPT", "--dangerously-skip-permissions"]
+
+# Instructions shown to MCP clients describing when to use this server.
+# instructions = "Use this server to research questions against the internal wiki when the user asks about <your domain>."
+
+# Description for the 'research' tool shown to MCP clients.
+# Guides the agent on when to invoke this tool.
+# research_tool_description = "Submit a question about <your domain> to be investigated against the wiki. Returns a task_id to poll with get_result."
+
+# How long to keep completed/failed task results before evicting (seconds, default: 900)
+# completed_task_ttl_secs = 900
+
+# Maximum time an agent command may run before being killed (seconds, default: 1800)
+# agent_timeout_secs = 1800
+
+# Path to the prompt template file (must contain a {question} placeholder)
+prompt_template = "prompt.md"
