@@ -1,0 +1,27 @@
+[package]
+name = "wikidesk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI client for wikidesk: sync wiki and submit research questions."
+readme = "../README.md"
+keywords = ["mcp", "wiki", "llm", "agent", "research"]
+categories = ["command-line-utilities", "development-tools"]
+include = [
+  "/src/**/*",
+  "/Cargo.toml",
+  "/Cargo.lock",
+  "/README.md",
+  "/LICENSE-MIT",
+  "/LICENSE-APACHE",
+]
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.13", features = ["json"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs"] }
+serde = { version = "1", features = ["derive"] }
+anyhow = "1"
+wikidesk-shared.workspace = true
