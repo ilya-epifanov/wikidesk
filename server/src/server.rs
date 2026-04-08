@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use rmcp::{
-    RoleServer, ServerHandler,
+    ErrorData, RoleServer, ServerHandler,
     handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
     model::{
         CallToolRequestParams, CallToolResult, ListToolsResult, ServerCapabilities, ServerInfo,
@@ -13,7 +13,8 @@ use rmcp::{
     tool, tool_router,
 };
 
-use crate::queue::AppState;
+use crate::queue::{AppState, TaskStatus};
+use crate::rewrite;
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ResearchParams {
@@ -39,7 +40,8 @@ impl ResearchServer {
         if let Some(desc) = &state.config.research_tool_description
             && let Some(route) = tool_router.map.get_mut("research")
         {
-            route.attr.description = Some(Cow::Owned(desc.clone()));
+            let base = route.attr.description.as_deref().unwrap_or_default();
+            route.attr.description = Some(Cow::Owned(format!("{base}\n\n{desc}")));
         }
         Self { state, tool_router }
     }
@@ -50,22 +52,42 @@ impl ResearchServer {
     /// Submit a research question to be investigated against the wiki.
     /// Returns a task_id to poll with get_result.
     #[tool(name = "research")]
-    async fn research(&self, Parameters(params): Parameters<ResearchParams>) -> String {
-        match self.state.enqueue(params.question).await {
-            Ok(task_id) => serde_json::json!({ "task_id": task_id }).to_string(),
-            Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
-        }
+    async fn research(
+        &self,
+        Parameters(params): Parameters<ResearchParams>,
+    ) -> Result<String, ErrorData> {
+        let task_id = self
+            .state
+            .enqueue(params.question)
+            .await
+            .map_err(|_| ErrorData::internal_error("research queue is full", None))?;
+        Ok(serde_json::json!({ "task_id": task_id }).to_string())
     }
 
     /// Get the status and result of a research task.
     #[tool(name = "get_result")]
-    async fn get_result(&self, Parameters(params): Parameters<GetResultParams>) -> String {
+    async fn get_result(
+        &self,
+        Parameters(params): Parameters<GetResultParams>,
+    ) -> Result<String, ErrorData> {
         match self.state.get_task_status(&params.task_id).await {
-            Some(status) => serde_json::to_string(&status).unwrap(),
-            None => serde_json::json!({
-                "error": format!("unknown task_id '{}'", params.task_id),
-            })
-            .to_string(),
+            Some(TaskStatus::Done { answer }) => {
+                let wiki_repo = self.state.config.wiki_repo.clone();
+                let answer = tokio::task::spawn_blocking(move || {
+                    rewrite::rewrite_wikilinks(&answer, &wiki_repo, "wiki")
+                })
+                .await
+                .map_err(|e| ErrorData::internal_error(format!("{e:#}"), None))?;
+                Ok(serde_json::json!({ "status": "done", "answer": answer }).to_string())
+            }
+            Some(TaskStatus::Failed { error }) => {
+                Err(ErrorData::internal_error(format!("research failed: {error}"), None))
+            }
+            Some(status) => Ok(serde_json::to_string(&status).unwrap()),
+            None => Err(ErrorData::resource_not_found(
+                format!("unknown task_id '{}'", params.task_id),
+                None,
+            )),
         }
     }
 }

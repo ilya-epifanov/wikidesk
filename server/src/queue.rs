@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, watch};
 use tokio::time::Instant;
 
 use crate::agent;
@@ -22,15 +22,15 @@ pub enum TaskStatus {
     Failed { error: String },
 }
 
-#[derive(Debug, Clone)]
 struct Task {
     question: String,
-    status: TaskStatus,
+    status: watch::Sender<TaskStatus>,
     completed_at: Option<Instant>,
 }
 
 pub struct AppState {
     pub config: AppConfig,
+    research_semaphore: tokio::sync::Semaphore,
     tasks: Mutex<HashMap<String, Task>>,
     tx: mpsc::Sender<String>,
 }
@@ -45,11 +45,13 @@ impl std::fmt::Debug for AppState {
 
 impl AppState {
     const QUEUE_CAPACITY: usize = 128;
+    const MAX_CONCURRENT_RESEARCH: usize = 2;
 
     pub fn new(config: AppConfig) -> (Self, mpsc::Receiver<String>) {
         let (tx, rx) = mpsc::channel(Self::QUEUE_CAPACITY);
         let state = Self {
             config,
+            research_semaphore: tokio::sync::Semaphore::new(Self::MAX_CONCURRENT_RESEARCH),
             tasks: Mutex::new(HashMap::new()),
             tx,
         };
@@ -58,35 +60,56 @@ impl AppState {
 
     pub async fn enqueue(&self, question: String) -> Result<String, QueueFullError> {
         let id = uuid::Uuid::new_v4().to_string();
-        self.tx.try_send(id.clone()).map_err(|_| QueueFullError)?;
+        let (tx, _rx) = watch::channel(TaskStatus::Queued);
         let task = Task {
             question,
-            status: TaskStatus::Queued,
+            status: tx,
             completed_at: None,
         };
-        self.tasks.lock().await.insert(id.clone(), task);
+        let mut tasks = self.tasks.lock().await;
+        self.tx.try_send(id.clone()).map_err(|_| QueueFullError)?;
+        tasks.insert(id.clone(), task);
         Ok(id)
     }
 
-    #[cfg(test)]
-    async fn get_task(&self, id: &str) -> Option<Task> {
-        self.tasks.lock().await.get(id).cloned()
+    pub async fn get_task_status(&self, id: &str) -> Option<TaskStatus> {
+        self.tasks
+            .lock()
+            .await
+            .get(id)
+            .map(|t| t.status.borrow().clone())
     }
 
-    pub async fn get_task_status(&self, id: &str) -> Option<TaskStatus> {
-        self.tasks.lock().await.get(id).map(|t| t.status.clone())
+    pub async fn wait_for_result(&self, id: &str) -> Option<TaskStatus> {
+        let mut rx = {
+            let tasks = self.tasks.lock().await;
+            tasks.get(id)?.status.subscribe()
+        };
+        loop {
+            {
+                let status = rx.borrow_and_update();
+                if matches!(*status, TaskStatus::Done { .. } | TaskStatus::Failed { .. }) {
+                    return Some(status.clone());
+                }
+            }
+            // Sender dropped (task reaped) before completion — shouldn't happen in practice.
+            if rx.changed().await.is_err() {
+                return None;
+            }
+        }
     }
 
     async fn start_task(&self, id: &str) -> Option<String> {
         let mut tasks = self.tasks.lock().await;
         let task = tasks.get_mut(id)?;
-        task.status = TaskStatus::Running;
+        task.status.send_replace(TaskStatus::Running);
         Some(task.question.clone())
     }
 
     async fn finish_task(&self, id: &str, status: TaskStatus) {
-        if let Some(task) = self.tasks.lock().await.get_mut(id) {
-            task.status = status;
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.get_mut(id) {
+            task.status.send_replace(status);
             task.completed_at = Some(Instant::now());
         }
     }
@@ -112,22 +135,31 @@ pub async fn run_reaper(state: Arc<AppState>) {
 
 pub async fn run_worker(state: Arc<AppState>, mut rx: mpsc::Receiver<String>) {
     while let Some(task_id) = rx.recv().await {
-        let question = match state.start_task(&task_id).await {
-            Some(q) => q,
-            None => continue,
-        };
-        match agent::run_agent(&state.config, &question).await {
-            Ok(answer) => {
-                state
-                    .finish_task(&task_id, TaskStatus::Done { answer })
-                    .await;
+        let state = state.clone();
+        tokio::spawn(async move {
+            let _permit = state.research_semaphore.acquire().await.unwrap();
+            let question = match state.start_task(&task_id).await {
+                Some(q) => q,
+                None => return,
+            };
+            match agent::run_agent_raw(&state.config, &question).await {
+                Ok(answer) => {
+                    state
+                        .finish_task(&task_id, TaskStatus::Done { answer })
+                        .await;
+                }
+                Err(e) => {
+                    state
+                        .finish_task(
+                            &task_id,
+                            TaskStatus::Failed {
+                                error: format!("{e:#}"),
+                            },
+                        )
+                        .await;
+                }
             }
-            Err(e) => {
-                state
-                    .finish_task(&task_id, TaskStatus::Failed { error: format!("{e:#}") })
-                    .await;
-            }
-        }
+        });
     }
 }
 
@@ -164,15 +196,13 @@ mod tests {
     async fn enqueued_task_starts_as_queued() {
         let (state, _rx) = test_state();
         let id = state.enqueue("question".into()).await.unwrap();
-        let task = state.get_task(&id).await.unwrap();
-        assert_eq!(task.status, TaskStatus::Queued);
-        assert_eq!(task.question, "question");
+        assert_eq!(state.get_task_status(&id).await, Some(TaskStatus::Queued));
     }
 
     #[tokio::test]
-    async fn get_task_returns_none_for_unknown_id() {
+    async fn get_task_status_returns_none_for_unknown_id() {
         let (state, _rx) = test_state();
-        assert!(state.get_task("nonexistent").await.is_none());
+        assert!(state.get_task_status("nonexistent").await.is_none());
     }
 
     #[tokio::test]
@@ -180,14 +210,15 @@ mod tests {
         let (state, _rx) = test_state();
         let id = state.enqueue("q".into()).await.unwrap();
         state.start_task(&id).await;
-        state.finish_task(&id, TaskStatus::Done { answer: "the answer".into() }).await;
+        state
+            .finish_task(&id, TaskStatus::Done { answer: "the answer".into() })
+            .await;
 
-        let task = state.get_task(&id).await.unwrap();
         assert_eq!(
-            task.status,
-            TaskStatus::Done {
+            state.get_task_status(&id).await,
+            Some(TaskStatus::Done {
                 answer: "the answer".into(),
-            }
+            })
         );
     }
 
@@ -196,14 +227,18 @@ mod tests {
         let (state, _rx) = test_state();
         let id = state.enqueue("q".into()).await.unwrap();
         state.start_task(&id).await;
-        state.finish_task(&id, TaskStatus::Failed { error: "agent crashed".into() }).await;
+        state
+            .finish_task(
+                &id,
+                TaskStatus::Failed { error: "agent crashed".into() },
+            )
+            .await;
 
-        let task = state.get_task(&id).await.unwrap();
         assert_eq!(
-            task.status,
-            TaskStatus::Failed {
+            state.get_task_status(&id).await,
+            Some(TaskStatus::Failed {
                 error: "agent crashed".into(),
-            }
+            })
         );
     }
 
@@ -212,11 +247,12 @@ mod tests {
         let (state, _rx) = test_state();
         let id = state.enqueue("q".into()).await.unwrap();
         state.start_task(&id).await;
-        state.finish_task(&id, TaskStatus::Done { answer: "done".into() }).await;
+        state
+            .finish_task(&id, TaskStatus::Done { answer: "done".into() })
+            .await;
 
-        // Zero TTL means all completed tasks are immediately expired
         state.sweep_completed(Duration::ZERO).await;
-        assert!(state.get_task(&id).await.is_none());
+        assert!(state.get_task_status(&id).await.is_none());
     }
 
     #[tokio::test]
@@ -228,7 +264,30 @@ mod tests {
 
         state.sweep_completed(Duration::ZERO).await;
 
-        assert!(state.get_task(&queued_id).await.is_some());
-        assert!(state.get_task(&running_id).await.is_some());
+        assert!(state.get_task_status(&queued_id).await.is_some());
+        assert!(state.get_task_status(&running_id).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn wait_for_result_receives_notification() {
+        let (state, _rx) = test_state();
+        let id = state.enqueue("q".into()).await.unwrap();
+        state.start_task(&id).await;
+
+        let state_ref = &state;
+        let wait = async { state_ref.wait_for_result(&id).await };
+        let finish = async {
+            state_ref
+                .finish_task(&id, TaskStatus::Done { answer: "result".into() })
+                .await;
+        };
+
+        let (status, ()) = tokio::join!(wait, finish);
+        assert_eq!(
+            status,
+            Some(TaskStatus::Done {
+                answer: "result".into(),
+            })
+        );
     }
 }

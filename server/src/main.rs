@@ -7,13 +7,14 @@ use rmcp::transport::streamable_http_server::{
 use tokio_util::sync::CancellationToken;
 
 mod agent;
+mod api;
 mod config;
 mod queue;
 mod rewrite;
 mod server;
 
 #[derive(Parser)]
-#[command(name = "research-mcp", about = "MCP server for LLM wiki research")]
+#[command(name = "wikidesk", about = "MCP server for LLM wiki research")]
 struct Cli {
     /// Path to the configuration file
     #[arg(short, long, default_value = "config.toml")]
@@ -35,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(
         wiki_repo = %cfg.wiki_repo.display(),
         bind_address = %cfg.bind_addr,
-        "starting research-mcp",
+        "starting wikidesk",
     );
 
     let bind_addr = cfg.bind_addr;
@@ -59,7 +60,11 @@ async fn main() -> anyhow::Result<()> {
             StreamableHttpServerConfig::default().with_cancellation_token(ct.child_token()),
         );
 
-    let router = axum::Router::new().nest_service("/mcp", service);
+    let router = axum::Router::new()
+        .nest_service("/mcp", service)
+        .route("/api/research", axum::routing::post(api::research))
+        .route("/api/sync", axum::routing::post(api::sync))
+        .with_state(state.clone());
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
 
     tracing::info!(%bind_addr, "listening");

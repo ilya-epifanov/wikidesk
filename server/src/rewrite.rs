@@ -49,7 +49,7 @@ fn visit_dir(
     Ok(())
 }
 
-pub fn rewrite_wikilinks(text: &str, wiki_repo: &Path) -> String {
+pub fn rewrite_wikilinks(text: &str, wiki_repo: &Path, link_prefix: &str) -> String {
     let wiki_dir = wiki_repo.join("wiki");
     let page_map = match build_page_map(&wiki_dir) {
         Ok(m) => m,
@@ -67,7 +67,7 @@ pub fn rewrite_wikilinks(text: &str, wiki_repo: &Path) -> String {
                 .unwrap_or((inner, inner));
             match page_map.get(&page.to_lowercase()) {
                 Some(PageEntry::Unique(rel_path)) => {
-                    format!("[{display}](wiki/{})", rel_path.display())
+                    format!("[{display}]({link_prefix}/{})", rel_path.display())
                 }
                 Some(PageEntry::Ambiguous) | None => format!("[{display}]()"),
             }
@@ -95,7 +95,7 @@ mod tests {
         setup_wiki(dir.path());
 
         let input = "See [[RLHF]] and [[DPO]] for details.";
-        let result = rewrite_wikilinks(input, dir.path());
+        let result = rewrite_wikilinks(input, dir.path(), "wiki");
         assert_eq!(
             result,
             "See [RLHF](wiki/concepts/RLHF.md) and [DPO](wiki/concepts/DPO.md) for details."
@@ -108,7 +108,7 @@ mod tests {
         setup_wiki(dir.path());
 
         let input = "See [[NonExistent]] for more.";
-        let result = rewrite_wikilinks(input, dir.path());
+        let result = rewrite_wikilinks(input, dir.path(), "wiki");
         assert_eq!(result, "See [NonExistent]() for more.");
     }
 
@@ -118,7 +118,7 @@ mod tests {
         setup_wiki(dir.path());
 
         let input = "No links here.";
-        let result = rewrite_wikilinks(input, dir.path());
+        let result = rewrite_wikilinks(input, dir.path(), "wiki");
         assert_eq!(result, "No links here.");
     }
 
@@ -128,7 +128,7 @@ mod tests {
         setup_wiki(dir.path());
 
         let input = "Read [[alignment]] for background.";
-        let result = rewrite_wikilinks(input, dir.path());
+        let result = rewrite_wikilinks(input, dir.path(), "wiki");
         assert_eq!(
             result,
             "Read [alignment](wiki/topics/alignment.md) for background."
@@ -141,7 +141,7 @@ mod tests {
         setup_wiki(dir.path());
 
         let input = "See [[RLHF|reinforcement learning from human feedback]].";
-        let result = rewrite_wikilinks(input, dir.path());
+        let result = rewrite_wikilinks(input, dir.path(), "wiki");
         assert_eq!(
             result,
             "See [reinforcement learning from human feedback](wiki/concepts/RLHF.md)."
@@ -154,7 +154,7 @@ mod tests {
         setup_wiki(dir.path());
 
         let input = "See [[missing|some description]].";
-        let result = rewrite_wikilinks(input, dir.path());
+        let result = rewrite_wikilinks(input, dir.path(), "wiki");
         assert_eq!(result, "See [some description]().");
     }
 
@@ -168,7 +168,7 @@ mod tests {
         fs::write(wiki.join("b/overview.md"), "# Overview B").unwrap();
 
         let input = "See [[overview]].";
-        let result = rewrite_wikilinks(input, dir.path());
+        let result = rewrite_wikilinks(input, dir.path(), "wiki");
         assert_eq!(result, "See [overview]().");
     }
 
@@ -178,7 +178,7 @@ mod tests {
         setup_wiki(dir.path());
 
         let input = "See [[rlhf]] and [[dpo]] and [[Alignment]].";
-        let result = rewrite_wikilinks(input, dir.path());
+        let result = rewrite_wikilinks(input, dir.path(), "wiki");
         assert_eq!(
             result,
             "See [rlhf](wiki/concepts/RLHF.md) and [dpo](wiki/concepts/DPO.md) and [Alignment](wiki/topics/alignment.md)."
@@ -190,7 +190,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // No wiki/ directory created
         let input = "See [[RLHF]].";
-        let result = rewrite_wikilinks(input, dir.path());
+        let result = rewrite_wikilinks(input, dir.path(), "wiki");
         assert_eq!(result, "See [[RLHF]].");
+    }
+
+    #[test]
+    fn custom_link_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_wiki(dir.path());
+
+        let input = "See [[RLHF]] and [[alignment]].";
+        let result = rewrite_wikilinks(input, dir.path(), "/home/user/notes");
+        assert_eq!(
+            result,
+            "See [RLHF](/home/user/notes/concepts/RLHF.md) and [alignment](/home/user/notes/topics/alignment.md)."
+        );
     }
 }

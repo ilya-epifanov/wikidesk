@@ -1,7 +1,6 @@
 use crate::config::AppConfig;
-use crate::rewrite;
 
-pub async fn run_agent(config: &AppConfig, question: &str) -> anyhow::Result<String> {
+pub async fn run_agent_raw(config: &AppConfig, question: &str) -> anyhow::Result<String> {
     let prompt = config
         .prompt_template_content
         .replace(crate::config::QUESTION_PLACEHOLDER, question);
@@ -41,8 +40,6 @@ pub async fn run_agent(config: &AppConfig, question: &str) -> anyhow::Result<Str
         anyhow::bail!("agent exited with {}: {}", output.status, stderr.trim());
     }
 
-    Ok(rewrite::rewrite_wikilinks(
-        &String::from_utf8_lossy(&output.stdout),
-        &config.wiki_repo,
-    ))
+    Ok(String::from_utf8(output.stdout)
+        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
 }
