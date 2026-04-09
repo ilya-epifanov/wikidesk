@@ -80,9 +80,10 @@ impl ResearchServer {
                 .map_err(|e| ErrorData::internal_error(format!("{e:#}"), None))?;
                 Ok(serde_json::json!({ "status": "done", "answer": answer }).to_string())
             }
-            Some(TaskStatus::Failed { error }) => {
-                Err(ErrorData::internal_error(format!("research failed: {error}"), None))
-            }
+            Some(TaskStatus::Failed { error }) => Err(ErrorData::internal_error(
+                format!("research failed: {error}"),
+                None,
+            )),
             Some(status) => Ok(serde_json::to_string(&status).unwrap()),
             None => Err(ErrorData::resource_not_found(
                 format!("unknown task_id '{}'", params.task_id),
@@ -94,12 +95,9 @@ impl ResearchServer {
 
 impl ServerHandler for ResearchServer {
     fn get_info(&self) -> ServerInfo {
-        let instructions = self
-            .state
-            .config
-            .instructions
-            .as_deref()
-            .unwrap_or("Research server: use 'research' to submit questions, 'get_result' to poll results.");
+        let instructions = self.state.config.instructions.as_deref().unwrap_or(
+            "Research server: use 'research' to submit questions, 'get_result' to poll results.",
+        );
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(instructions)
     }

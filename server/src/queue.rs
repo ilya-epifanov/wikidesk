@@ -211,7 +211,12 @@ mod tests {
         let id = state.enqueue("q".into()).await.unwrap();
         state.start_task(&id).await;
         state
-            .finish_task(&id, TaskStatus::Done { answer: "the answer".into() })
+            .finish_task(
+                &id,
+                TaskStatus::Done {
+                    answer: "the answer".into(),
+                },
+            )
             .await;
 
         assert_eq!(
@@ -230,7 +235,9 @@ mod tests {
         state
             .finish_task(
                 &id,
-                TaskStatus::Failed { error: "agent crashed".into() },
+                TaskStatus::Failed {
+                    error: "agent crashed".into(),
+                },
             )
             .await;
 
@@ -248,7 +255,12 @@ mod tests {
         let id = state.enqueue("q".into()).await.unwrap();
         state.start_task(&id).await;
         state
-            .finish_task(&id, TaskStatus::Done { answer: "done".into() })
+            .finish_task(
+                &id,
+                TaskStatus::Done {
+                    answer: "done".into(),
+                },
+            )
             .await;
 
         state.sweep_completed(Duration::ZERO).await;
@@ -278,7 +290,12 @@ mod tests {
         let wait = async { state_ref.wait_for_result(&id).await };
         let finish = async {
             state_ref
-                .finish_task(&id, TaskStatus::Done { answer: "result".into() })
+                .finish_task(
+                    &id,
+                    TaskStatus::Done {
+                        answer: "result".into(),
+                    },
+                )
                 .await;
         };
 

@@ -1,7 +1,21 @@
 [package]
 name = "wikidesk-shared"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared types and utilities for wikidesk server and client."
+readme = "../README.md"
+keywords = ["mcp", "wiki", "llm", "agent", "research"]
+include = [
+  "/src/**/*",
+  "/Cargo.toml",
+  "/Cargo.lock",
+  "/README.md",
+  "/LICENSE-MIT",
+  "/LICENSE-APACHE",
+]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

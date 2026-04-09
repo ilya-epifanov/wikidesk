@@ -1,0 +1,4 @@
+[workspace]
+repo_url = "https://github.com/ilya-epifanov/wikidesk"
+pr_labels = ["release"]
+git_release_enable = false

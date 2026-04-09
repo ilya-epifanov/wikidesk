@@ -20,6 +20,9 @@
         pkgs = import nixpkgs {
           inherit system;
           overlays = [ rust-overlay.overlays.default ];
+          config.allowUnfreePredicate = pkg: builtins.elem (pkgs.lib.getName pkg) [
+            "drawio"
+          ];
         };
         claude-code = llm-agents.packages.${system}.claude-code;
       in {
@@ -32,15 +35,23 @@
             jq
             curl
             (rust-bin.stable.latest.default.override {
-              extensions = [ "rust-src" "rust-analyzer" ];
+              extensions = [ "rust-src" "rust-analyzer" "clippy" "rustfmt" ];
             })
             gcc
             pkg-config
             openssl
             openssl.dev
+            nodejs
+            drawio-headless
+            librsvg
+            fontconfig
+            inter
+            roboto
+            dejavu_fonts
             neovim
           ];
           profile = ''
+            export NPM_CONFIG_CACHE="$PWD/.npm-cache"
             export LANG="en_US.UTF-8"
             export SSL_CERT_FILE="${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
             export NIX_SSL_CERT_FILE="${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"

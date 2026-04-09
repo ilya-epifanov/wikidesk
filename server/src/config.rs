@@ -29,7 +29,7 @@ fn default_bind_address() -> String {
 }
 
 fn default_completed_task_ttl_secs() -> u64 {
-    900
+    7200
 }
 
 fn default_agent_timeout_secs() -> u64 {

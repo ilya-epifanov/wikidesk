@@ -28,10 +28,7 @@ pub async fn run_agent_raw(config: &AppConfig, question: &str) -> anyhow::Result
     let output = match tokio::time::timeout(config.agent_timeout, child.wait_with_output()).await {
         Ok(result) => result?,
         Err(_) => {
-            anyhow::bail!(
-                "agent timed out after {}s",
-                config.agent_timeout.as_secs()
-            );
+            anyhow::bail!("agent timed out after {}s", config.agent_timeout.as_secs());
         }
     };
 

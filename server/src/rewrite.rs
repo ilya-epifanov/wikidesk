@@ -17,11 +17,7 @@ fn build_page_map(wiki_dir: &Path) -> std::io::Result<HashMap<String, PageEntry>
     Ok(map)
 }
 
-fn visit_dir(
-    base: &Path,
-    dir: &Path,
-    map: &mut HashMap<String, PageEntry>,
-) -> std::io::Result<()> {
+fn visit_dir(base: &Path, dir: &Path, map: &mut HashMap<String, PageEntry>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -62,9 +58,7 @@ pub fn rewrite_wikilinks(text: &str, wiki_repo: &Path, link_prefix: &str) -> Str
     WIKILINK_RE
         .replace_all(text, |caps: &regex::Captures| {
             let inner = &caps[1];
-            let (page, display) = inner
-                .split_once('|')
-                .unwrap_or((inner, inner));
+            let (page, display) = inner.split_once('|').unwrap_or((inner, inner));
             match page_map.get(&page.to_lowercase()) {
                 Some(PageEntry::Unique(rel_path)) => {
                     format!("[{display}]({link_prefix}/{})", rel_path.display())

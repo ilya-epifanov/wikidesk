@@ -2,12 +2,10 @@ use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
 use clap::{Parser, Subcommand};
-use wikidesk_shared::{
-    ResearchRequest, ResearchResponse, SyncRequest, SyncResponse, snapshot_dir,
-};
+use wikidesk_shared::{ResearchRequest, ResearchResponse, SyncRequest, SyncResponse, snapshot_dir};
 
 #[derive(Parser)]
-#[command(name = "wikidesk-client", about = "CLI client for wikidesk server")]
+#[command(name = "wikidesk", about = "CLI client for wikidesk server")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -151,9 +149,7 @@ fn apply_sync(wiki_path: &Path, sync: &SyncResponse) -> anyhow::Result<()> {
             Err(e) => return Err(e.into()),
         };
         if !canonical.starts_with(&wiki_canonical) {
-            anyhow::bail!(
-                "resolved path escapes wiki directory: '{path}'"
-            );
+            anyhow::bail!("resolved path escapes wiki directory: '{path}'");
         }
         std::fs::remove_file(&target)?;
     }

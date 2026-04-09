@@ -73,14 +73,21 @@ fn visit(base: &Path, dir: &Path, files: &mut Vec<FileEntry>) -> Result<(), Walk
             source,
         })?;
         let path = entry.path();
-        let is_dir = entry.file_type().map_err(|source| WalkError::Io {
-            path: path.display().to_string(),
-            source,
-        })?.is_dir();
+        let is_dir = entry
+            .file_type()
+            .map_err(|source| WalkError::Io {
+                path: path.display().to_string(),
+                source,
+            })?
+            .is_dir();
         if is_dir {
             visit(base, &path, files)?;
         } else {
-            let rel = path.strip_prefix(base).unwrap().to_string_lossy().into_owned();
+            let rel = path
+                .strip_prefix(base)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
             let bytes = std::fs::read(&path).map_err(|source| WalkError::Io {
                 path: rel.clone(),
                 source,

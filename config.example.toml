@@ -8,20 +8,34 @@
 # Command for spawning the research agent.
 # The literal "$PROMPT" element is replaced with the rendered prompt.
 # Executed directly (no shell) with wiki_repo as the working directory.
+#
+# SECURITY WARNING: The research agent runs with full, unrestricted
+# permissions on the host. Flags like --dangerously-skip-permissions
+# (Claude Code) or equivalent settings grant arbitrary file and command
+# access. You MUST wrap either the server itself or the agent_command
+#  inside a sandbox (Docker, Podman, bubblewrap, VM, or similar)
+# to prevent the agent from accessing anything beyond the wiki repo.
 agent_command = ["claude", "-p", "$PROMPT", "--dangerously-skip-permissions"]
 
 # Instructions shown to MCP clients describing when to use this server.
-# instructions = "Use this server to research questions against the internal wiki when the user asks about <your domain>."
+# instructions = "Use this server whenever you have a question about !!!INSERT YOUR WIKI TOPICS HERE!!!.<important>Always use this MCP for !!!REITERATE YOUR TOPICS HERE!!! research</important>"
 
 # Description for the 'research' tool shown to MCP clients.
 # Guides the agent on when to invoke this tool.
-# research_tool_description = "Submit a question about <your domain> to be investigated against the wiki. Returns a task_id to poll with get_result."
+# research_tool_description = "Submit a question about !!!INSERT YOUR WIKI TOPICS HERE!!!. Returns a task_id to poll with get_result. <important>Always use this tool for !!!REITERATE YOUR TOPICS HERE!!!</important>"
 
-# How long to keep completed/failed task results before evicting (seconds, default: 900)
-# completed_task_ttl_secs = 900
+# How long to keep completed/failed task results before evicting (seconds, default: 7200)
+# completed_task_ttl_secs = 7200
 
 # Maximum time an agent command may run before being killed (seconds, default: 1800)
 # agent_timeout_secs = 1800
 
 # Path to the prompt template file (must contain a {question} placeholder)
-prompt_template = "prompt.md"
+prompt_template = "RESEARCH_PROMPT.md"
+
+# Example RESEARCH_PROMPT.md:
+# Research the following question using the wiki in this repository.
+# Follow the workflows described in CLAUDE.md. After updating the wiki,
+# provide a concise answer with [[wikilinks]] to relevant
+# pages you created or updated. Respond with ONLY the answer.
+# Question: {question}
