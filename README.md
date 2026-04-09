@@ -13,7 +13,7 @@ The primary workflow is simple: **agents read the `wiki/` directory directly** a
 3. The server queues the question and spawns a research agent (configurable command)
 4. The research agent investigates the question, potentially creating or updating wiki pages
 5. The answer is returned with `[[wikilinks]]` resolved to file paths
-6. Agents sync their local wiki copy via `POST /api/sync` (or the client CLI) to pick up changes
+6. Agents sync their local wiki copy automatically
 
 ## Agent rules
 
@@ -289,7 +289,7 @@ docker run -d \
   --restart unless-stopped \
   -v /path/to/wiki-repo:/wiki \
   -v /path/to/config.toml:/etc/wikidesk/config.toml:ro \
-  -p 3000:3000 \
+  -p 1238:1238 \
   wikidesk-server --config /etc/wikidesk/config.toml
 ```
 
@@ -339,7 +339,7 @@ cargo install wikidesk
 #### Configure and use
 
 ```sh
-export WIKIDESK_SERVER_URL="http://your-server:3000"
+export WIKIDESK_SERVER_URL="http://your-server:1238"
 export WIKIDESK_WIKI_PATH="./local-wiki"
 
 # Submit a question and sync wiki
@@ -361,12 +361,18 @@ Agents connect to the server directly via MCP. The wiki directory is mounted or 
 
 Add wikidesk to your agent's MCP configuration:
 
+```sh
+claude mcp add wikidesk --transport http http://your-server:1238/mcp
+```
+
+Or add it manually to `.mcp.json`:
+
 ```json
 {
   "mcpServers": {
     "wikidesk": {
       "type": "streamable-http",
-      "url": "http://your-server:3000/mcp"
+      "url": "http://your-server:1238/mcp"
     }
   }
 }
@@ -450,7 +456,7 @@ ln -s /mnt/c/path/to/wiki-repo/wiki ./wiki
 | Key | Default | Description |
 |-----|---------|-------------|
 | `wiki_repo` | `.` | Path to the wiki git repo (must contain `wiki/` subdirectory) |
-| `bind_address` | `127.0.0.1:3000` | HTTP bind address |
+| `bind_address` | `127.0.0.1:1238` | HTTP bind address |
 | `agent_command` | *(required)* | Command to spawn the research agent. Must contain exactly one `$PROMPT` element. |
 | `prompt_template` | *(required)* | Path to prompt template file (must contain `{question}` placeholder) |
 | `instructions` | *(optional)* | Instructions shown to MCP clients |
