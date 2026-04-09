@@ -2,3 +2,17 @@
 repo_url = "https://github.com/ilya-epifanov/wikidesk"
 pr_labels = ["release"]
 git_release_enable = false
+
+[[package]]
+name = "wikidesk"
+version_group = "wikidesk"
+
+[[package]]
+name = "wikidesk-server"
+version_group = "wikidesk"
+
+[[package]]
+name = "wikidesk-shared"
+version_group = "wikidesk"
+publish = false
+git_tag_enable = false
