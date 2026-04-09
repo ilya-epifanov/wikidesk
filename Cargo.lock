@@ -2512,7 +2512,7 @@ dependencies = [
 
 [[package]]
 name = "wikidesk"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2524,7 +2524,7 @@ dependencies = [
 
 [[package]]
 name = "wikidesk-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2547,7 +2547,7 @@ dependencies = [
 
 [[package]]
 name = "wikidesk-shared"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_with",
