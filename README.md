@@ -35,14 +35,16 @@ Configure your agents to use the wiki by adding rules to your `CLAUDE.md`, `AGEN
 <details>
 <summary>Read + research (agents can request new research via MCP)</summary>
 
+N.B.: tool names use Claude Code conventions in the snippet below.
+
 ```markdown
 ## Wiki
 
 * The `wiki/` directory contains a knowledge base on <your topics>.
   Consult it before making decisions in these areas.
 * Do not modify wiki files directly.
-* When the wiki doesn't cover a topic you need, use the `research` MCP
-  tool to request investigation. Poll `get_result` until the task completes,
+* When the wiki doesn't cover a topic you need, use the `mcp__wikidesk__research` MCP
+  tool to request investigation. Poll `mcp__wikidesk__get_result` until the task completes,
   then sync your local wiki copy.
 ```
 

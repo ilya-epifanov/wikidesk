@@ -2,8 +2,8 @@
 # Relative paths are resolved relative to this config file's directory.
 # wiki_repo = "."
 
-# HTTP bind address (default: 127.0.0.1:3000)
-# bind_address = "127.0.0.1:3000"
+# HTTP bind address (default: 127.0.0.1:1238)
+# bind_address = "127.0.0.1:1238"
 
 # Command for spawning the research agent.
 # The literal "$PROMPT" element is replaced with the rendered prompt.

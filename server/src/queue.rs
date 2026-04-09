@@ -170,7 +170,7 @@ mod tests {
     fn test_config() -> AppConfig {
         AppConfig {
             wiki_repo: "/tmp/nonexistent".into(),
-            bind_addr: "127.0.0.1:3000".parse().unwrap(),
+            bind_addr: "127.0.0.1:1238".parse().unwrap(),
             agent_command: vec!["echo".into(), "$PROMPT".into()],
             prompt_template_content: String::new(),
             instructions: None,

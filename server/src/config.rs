@@ -25,7 +25,7 @@ fn default_wiki_repo() -> PathBuf {
 }
 
 fn default_bind_address() -> String {
-    "127.0.0.1:3000".to_string()
+    "127.0.0.1:1238".to_string()
 }
 
 fn default_completed_task_ttl_secs() -> u64 {
@@ -181,7 +181,7 @@ prompt_template = "prompt.md"
 
         assert_eq!(
             cfg.bind_addr,
-            "127.0.0.1:3000".parse::<SocketAddr>().unwrap()
+            "127.0.0.1:1238".parse::<SocketAddr>().unwrap()
         );
         assert_eq!(cfg.agent_command, ["echo", "$PROMPT"]);
         assert_eq!(cfg.wiki_repo, dir.path().canonicalize().unwrap());
