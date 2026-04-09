@@ -2,6 +2,7 @@
 repo_url = "https://github.com/ilya-epifanov/wikidesk"
 pr_labels = ["release"]
 git_release_enable = false
+git_tag_enable = false
 changelog_path = "CHANGELOG.md"
 
 [[package]]
@@ -13,9 +14,10 @@ changelog_path = "CHANGELOG.md"
 name = "wikidesk-server"
 version_group = "wikidesk"
 changelog_path = "CHANGELOG.md"
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
 
 [[package]]
 name = "wikidesk-shared"
 version_group = "wikidesk"
-git_tag_enable = false
 changelog_path = "CHANGELOG.md"
