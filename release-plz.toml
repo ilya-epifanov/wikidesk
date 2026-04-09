@@ -17,6 +17,5 @@ changelog_path = "CHANGELOG.md"
 [[package]]
 name = "wikidesk-shared"
 version_group = "wikidesk"
-publish = false
 git_tag_enable = false
-changelog_update = false
+changelog_path = "CHANGELOG.md"
