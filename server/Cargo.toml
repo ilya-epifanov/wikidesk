@@ -34,7 +34,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"
-wikidesk-shared = { path = "../shared" }
+wikidesk-shared.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
