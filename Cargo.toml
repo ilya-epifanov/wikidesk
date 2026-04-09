@@ -9,12 +9,9 @@ rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ilya-epifanov/wikidesk"
 
-<<<<<<< Updated upstream
-=======
 [workspace.dependencies]
 wikidesk-shared = { path = "shared", version = "0.1.1" }
 
->>>>>>> Stashed changes
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"

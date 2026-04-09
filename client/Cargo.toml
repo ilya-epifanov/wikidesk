@@ -20,8 +20,8 @@ include = [
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.13", features = ["json"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs"] }
 serde = { version = "1", features = ["derive"] }
 anyhow = "1"
-wikidesk-shared = { path = "../shared" }
+wikidesk-shared.workspace = true
