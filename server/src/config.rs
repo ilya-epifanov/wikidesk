@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -66,8 +66,8 @@ pub enum ConfigError {
     PromptTemplateMissing(PathBuf),
     #[error("prompt_template '{}' does not contain {{question}} placeholder", .0.display())]
     PromptTemplateMissingPlaceholder(PathBuf),
-    #[error("bind_address '{0}' is not a valid socket address")]
-    InvalidBindAddress(String, #[source] std::net::AddrParseError),
+    #[error("failed to resolve bind_address '{0}'")]
+    InvalidBindAddress(String, #[source] std::io::Error),
     #[error("agent_command must not be empty")]
     AgentCommandEmpty,
     #[error("agent_command must contain exactly one {PROMPT_PLACEHOLDER} element")]
@@ -100,8 +100,15 @@ impl AppConfig {
         let prompt_template = resolve(&config_dir, raw.prompt_template);
         let bind_addr = raw
             .bind_address
-            .parse()
-            .map_err(|e| ConfigError::InvalidBindAddress(raw.bind_address.clone(), e))?;
+            .to_socket_addrs()
+            .map_err(|e| ConfigError::InvalidBindAddress(raw.bind_address.clone(), e))?
+            .next()
+            .ok_or_else(|| {
+                ConfigError::InvalidBindAddress(
+                    raw.bind_address.clone(),
+                    std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "no addresses found"),
+                )
+            })?;
 
         if raw.agent_command.is_empty() {
             return Err(ConfigError::AgentCommandEmpty);
@@ -238,6 +245,19 @@ prompt_template = "prompt.md"
             err,
             ConfigError::PromptTemplateMissingPlaceholder(_)
         ));
+    }
+
+    #[test]
+    fn accepts_hostname_bind_address() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_dir(dir.path());
+        let config_path = write_config(
+            dir.path(),
+            &format!("{BASE_CONFIG}bind_address = \"localhost:1238\"\n"),
+        );
+
+        let cfg = AppConfig::load(&config_path).unwrap();
+        assert_eq!(cfg.bind_addr.port(), 1238);
     }
 
     #[test]
