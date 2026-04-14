@@ -466,6 +466,10 @@ ln -s /mnt/c/path/to/wiki-repo/wiki ./wiki
 | `completed_task_ttl_secs` | `900` | How long to keep completed task results (seconds) |
 | `agent_timeout_secs` | `1800` | Maximum time an agent may run before being killed (seconds) |
 
+## See also
+
+- **[llmwiki-tool](https://github.com/ilya-epifanov/llmwiki-tooling)** -- a companion CLI for wiki maintenance: fixing broken links, renaming pages with reference updates, detecting orphans, and linting against configurable rules
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
