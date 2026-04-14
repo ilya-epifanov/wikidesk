@@ -466,6 +466,13 @@ ln -s /mnt/c/path/to/wiki-repo/wiki ./wiki
 | `completed_task_ttl_secs` | `900` | How long to keep completed task results (seconds) |
 | `agent_timeout_secs` | `1800` | Maximum time an agent may run before being killed (seconds) |
 
+## TODO
+
+- [ ] Add simple UI for monitoring research request queues
+- [ ] Manage multiple wikis, expose at different base HTTP contexts
+- [ ] Add an optional simple fixed git workflow: `git add .` → ask agent to commit in a loop until fixed point → `git push` (optional)
+- [ ] Support Claude's streaming-json output mode, ACP for better progress monitoring
+
 ## See also
 
 - **[llmwiki-tool](https://github.com/ilya-epifanov/llmwiki-tooling)** -- a companion CLI for wiki maintenance: fixing broken links, renaming pages with reference updates, detecting orphans, and linting against configurable rules
