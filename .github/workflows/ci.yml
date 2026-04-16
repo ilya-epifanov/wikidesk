@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  pull_request:
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: cargo check
+        run: cargo check --all-targets
+      - name: cargo test
+        run: cargo test
+      - name: cargo fmt
+        run: cargo fmt --check
