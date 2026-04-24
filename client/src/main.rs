@@ -45,6 +45,11 @@ impl ClientConfig {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Process env > .env.local > .env. dotenvy skips vars that are already set,
+    // so loading .env.local first lets it shadow .env.
+    load_dotenv(".env.local", dotenvy::from_filename(".env.local"));
+    load_dotenv(".env", dotenvy::dotenv());
+
     let cli = Cli::parse();
     let config = ClientConfig::from_env()?;
     // Research can run for up to 30 minutes; pad to avoid client-side timeout.
@@ -76,6 +81,14 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn load_dotenv(name: &str, result: dotenvy::Result<PathBuf>) {
+    if let Err(e) = result
+        && !e.not_found()
+    {
+        eprintln!("warning: failed to load {name}: {e}");
+    }
 }
 
 async fn run_sync(client: &reqwest::Client, config: &ClientConfig) -> anyhow::Result<()> {

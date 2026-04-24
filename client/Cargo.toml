@@ -20,6 +20,7 @@ include = [
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+dotenvy = "0.15.7"
 reqwest = { version = "0.13", features = ["json"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs"] }
 serde = { version = "1", features = ["derive"] }
