@@ -26,7 +26,7 @@
           ];
         };
         craneLib = crane.mkLib pkgs;
-        claude-code = llm-agents.packages.${system}.claude-code;
+        llm-agents-pkgs = llm-agents.packages.${system};
         hooksmith =
           let
             hooksmithSrc = pkgs.fetchFromGitHub {
@@ -45,7 +45,8 @@
         packages.default = pkgs.buildFHSEnv {
           name = "wikidesk-env";
           targetPkgs = pkgs: with pkgs; [
-            claude-code
+            llm-agents-pkgs.claude-code
+            llm-agents-pkgs.claude-code-acp
             git
             cacert
             jq

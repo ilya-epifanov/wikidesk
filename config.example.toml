@@ -5,6 +5,12 @@
 # HTTP bind address (default: 127.0.0.1:1238)
 # bind_address = "127.0.0.1:1238"
 
+# Runner type for executing the research agent (default: "generic")
+# - "generic": Spawns agent_command, captures stdout as the result.
+# - "stream-json": Parses Claude Code's --output-format=stream-json output.
+# - "acp": Uses Agent Client Protocol (claude-agent-acp) for structured communication.
+# runner = "generic"
+
 # Command for spawning the research agent.
 # The literal "$PROMPT" element is replaced with the rendered prompt.
 # Executed directly (no shell) with wiki_repo as the working directory.
@@ -13,9 +19,23 @@
 # permissions on the host. Flags like --dangerously-skip-permissions
 # (Claude Code) or equivalent settings grant arbitrary file and command
 # access. You MUST wrap either the server itself or the agent_command
-#  inside a sandbox (Docker, Podman, bubblewrap, VM, or similar)
+# inside a sandbox (Docker, Podman, bubblewrap, VM, or similar)
 # to prevent the agent from accessing anything beyond the wiki repo.
+#
+# Examples for each runner type:
+#
+# Generic (default):
 agent_command = ["claude", "-p", "$PROMPT", "--dangerously-skip-permissions"]
+#
+# Stream JSON:
+# runner = "stream-json"
+# agent_command = ["claude", "-p", "$PROMPT", "--output-format", "stream-json", "--dangerously-skip-permissions"]
+#
+# ACP (requires claude-agent-acp):
+# runner = "acp"
+# agent_command = ["claude-agent-acp"]
+# Note: For ACP, configure bypass permissions via <wiki_repo>/.claude/settings.json:
+#   { "permissions": { "defaultMode": "bypass" } }
 
 # Instructions shown to MCP clients describing when to use this server.
 # instructions = "Use this server whenever you have a question about !!!INSERT YOUR WIKI TOPICS HERE!!!.<important>Always use this MCP for !!!REITERATE YOUR TOPICS HERE!!! research</important>"

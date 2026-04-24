@@ -6,8 +6,8 @@ use serde::Serialize;
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::time::Instant;
 
-use crate::agent;
-use crate::config::AppConfig;
+use crate::config::{self, AppConfig};
+use crate::runner::{self, Runner};
 
 #[derive(Debug, thiserror::Error)]
 #[error("research queue is full")]
@@ -30,6 +30,7 @@ struct Task {
 
 pub struct AppState {
     pub config: AppConfig,
+    runner: Arc<dyn Runner>,
     research_semaphore: tokio::sync::Semaphore,
     tasks: Mutex<HashMap<String, Task>>,
     tx: mpsc::Sender<String>,
@@ -49,8 +50,10 @@ impl AppState {
 
     pub fn new(config: AppConfig) -> (Self, mpsc::Receiver<String>) {
         let (tx, rx) = mpsc::channel(Self::QUEUE_CAPACITY);
+        let runner = runner::create_runner(config.runner);
         let state = Self {
             config,
+            runner,
             research_semaphore: tokio::sync::Semaphore::new(Self::MAX_CONCURRENT_RESEARCH),
             tasks: Mutex::new(HashMap::new()),
             tx,
@@ -142,10 +145,30 @@ pub async fn run_worker(state: Arc<AppState>, mut rx: mpsc::Receiver<String>) {
                 Some(q) => q,
                 None => return,
             };
-            match agent::run_agent_raw(&state.config, &question).await {
-                Ok(answer) => {
+            let prompt = state
+                .config
+                .prompt_template_content
+                .replace(config::QUESTION_PLACEHOLDER, &question);
+            let run = state.runner.run(
+                &state.config.agent_command,
+                &prompt,
+                &state.config.wiki_repo,
+                state.config.agent_timeout,
+            );
+            match run.await {
+                Ok(Some(answer)) => {
                     state
                         .finish_task(&task_id, TaskStatus::Done { answer })
+                        .await;
+                }
+                Ok(None) => {
+                    state
+                        .finish_task(
+                            &task_id,
+                            TaskStatus::Failed {
+                                error: "agent produced no output".to_string(),
+                            },
+                        )
                         .await;
                 }
                 Err(e) => {
@@ -171,6 +194,7 @@ mod tests {
         AppConfig {
             wiki_repo: "/tmp/nonexistent".into(),
             bind_addr: "127.0.0.1:1238".parse().unwrap(),
+            runner: crate::runner::RunnerType::default(),
             agent_command: vec!["echo".into(), "$PROMPT".into()],
             prompt_template_content: String::new(),
             instructions: None,

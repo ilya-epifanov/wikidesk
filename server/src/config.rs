@@ -4,12 +4,16 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::runner::RunnerType;
+
 #[derive(Deserialize)]
 struct RawConfig {
     #[serde(default = "default_wiki_repo")]
     wiki_repo: PathBuf,
     #[serde(default = "default_bind_address")]
     bind_address: String,
+    #[serde(default)]
+    runner: RunnerType,
     agent_command: Vec<String>,
     prompt_template: PathBuf,
     instructions: Option<String>,
@@ -43,6 +47,7 @@ pub const PROMPT_PLACEHOLDER: &str = "$PROMPT";
 pub struct AppConfig {
     pub wiki_repo: PathBuf,
     pub bind_addr: SocketAddr,
+    pub runner: RunnerType,
     pub agent_command: Vec<String>,
     pub prompt_template_content: String,
     pub instructions: Option<String>,
@@ -72,6 +77,10 @@ pub enum ConfigError {
     AgentCommandEmpty,
     #[error("agent_command must contain exactly one {PROMPT_PLACEHOLDER} element")]
     AgentCommandMissingPrompt,
+    #[error(
+        "agent_command for acp runner must not contain {PROMPT_PLACEHOLDER} (ACP sends prompt via RPC)"
+    )]
+    AgentCommandUnexpectedPrompt,
 }
 
 fn resolve(base: &Path, path: PathBuf) -> PathBuf {
@@ -118,8 +127,12 @@ impl AppConfig {
             .iter()
             .filter(|a| a.as_str() == PROMPT_PLACEHOLDER)
             .count();
-        if prompt_count != 1 {
-            return Err(ConfigError::AgentCommandMissingPrompt);
+        if raw.runner.requires_prompt_placeholder() {
+            if prompt_count != 1 {
+                return Err(ConfigError::AgentCommandMissingPrompt);
+            }
+        } else if prompt_count != 0 {
+            return Err(ConfigError::AgentCommandUnexpectedPrompt);
         }
 
         if !wiki_repo.exists() {
@@ -144,6 +157,7 @@ impl AppConfig {
         Ok(AppConfig {
             wiki_repo,
             bind_addr,
+            runner: raw.runner,
             agent_command: raw.agent_command,
             prompt_template_content,
             instructions: raw.instructions,
@@ -297,5 +311,31 @@ prompt_template = "prompt.md"
 
         let err = AppConfig::load(&config_path).unwrap_err();
         assert!(matches!(err, ConfigError::AgentCommandMissingPrompt));
+    }
+
+    #[test]
+    fn acp_runner_accepts_command_without_prompt_placeholder() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_dir(dir.path());
+        let config_path = write_config(
+            dir.path(),
+            "runner = \"acp\"\nagent_command = [\"claude-agent-acp\"]\nprompt_template = \"prompt.md\"\n",
+        );
+
+        let cfg = AppConfig::load(&config_path).unwrap();
+        assert_eq!(cfg.runner, RunnerType::Acp);
+    }
+
+    #[test]
+    fn acp_runner_rejects_command_with_prompt_placeholder() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_dir(dir.path());
+        let config_path = write_config(
+            dir.path(),
+            "runner = \"acp\"\nagent_command = [\"claude-agent-acp\", \"$PROMPT\"]\nprompt_template = \"prompt.md\"\n",
+        );
+
+        let err = AppConfig::load(&config_path).unwrap_err();
+        assert!(matches!(err, ConfigError::AgentCommandUnexpectedPrompt));
     }
 }

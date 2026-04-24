@@ -459,19 +459,78 @@ ln -s /mnt/c/path/to/wiki-repo/wiki ./wiki
 |-----|---------|-------------|
 | `wiki_repo` | `.` | Path to the wiki git repo (must contain `wiki/` subdirectory) |
 | `bind_address` | `127.0.0.1:1238` | HTTP bind address |
-| `agent_command` | *(required)* | Command to spawn the research agent. Must contain exactly one `$PROMPT` element. |
+| `runner` | `generic` | Runner type: `generic`, `stream-json`, or `acp` (see below) |
+| `agent_command` | *(required)* | Command to spawn the research agent. Must contain exactly one `$PROMPT` element (except for `acp` runner). |
 | `prompt_template` | *(required)* | Path to prompt template file (must contain `{question}` placeholder) |
 | `instructions` | *(optional)* | Instructions shown to MCP clients |
 | `research_tool_description` | *(optional)* | Custom description for the `research` MCP tool |
 | `completed_task_ttl_secs` | `900` | How long to keep completed task results (seconds) |
 | `agent_timeout_secs` | `1800` | Maximum time an agent may run before being killed (seconds) |
 
+### Runner types
+
+wikidesk supports three runner types for executing research agents:
+
+<details>
+<summary><strong>generic</strong> (default) -- simple stdout capture</summary>
+
+Spawns the command, waits for it to exit, and captures stdout as the result. Use `--dangerously-skip-permissions` in the command.
+
+```toml
+runner = "generic"
+agent_command = ["claude", "-p", "$PROMPT", "--dangerously-skip-permissions"]
+```
+
+</details>
+
+<details>
+<summary><strong>stream-json</strong> -- Claude Code streaming output</summary>
+
+Parses Claude Code's `--output-format=stream-json` for real-time progress. Extracts text from streaming events and the final result.
+
+```toml
+runner = "stream-json"
+agent_command = ["claude", "-p", "$PROMPT", "--output-format", "stream-json", "--dangerously-skip-permissions"]
+```
+
+</details>
+
+<details>
+<summary><strong>acp</strong> -- Agent Client Protocol</summary>
+
+Uses the [Agent Client Protocol](https://agentclientprotocol.com/) for structured communication with `claude-agent-acp`. This provides richer progress information and proper lifecycle management.
+
+```toml
+runner = "acp"
+agent_command = ["claude-agent-acp"]
+```
+
+**Bypass permissions with ACP:** Unlike the CLI runners, ACP doesn't accept command-line flags for permissions. Instead, configure bypass mode via Claude's settings file in your wiki repo:
+
+```sh
+# Create settings file in the wiki repo
+mkdir -p <wiki_repo>/.claude
+cat > <wiki_repo>/.claude/settings.json << 'EOF'
+{
+  "permissions": {
+    "defaultMode": "bypass"
+  }
+}
+EOF
+```
+
+The ACP runner passes the wiki repo as the working directory, so `claude-agent-acp` automatically picks up these settings.
+
+**Note:** Bypass permissions are disabled when running as root unless `IS_SANDBOX=1` is set in the environment.
+
+</details>
+
 ## TODO
 
 - [ ] Add simple UI for monitoring research request queues
 - [ ] Manage multiple wikis, expose at different base HTTP contexts
 - [ ] Add an optional simple fixed git workflow: `git add .` → ask agent to commit in a loop until fixed point → `git push` (optional)
-- [ ] Support Claude's streaming-json output mode, ACP for better progress monitoring
+- [x] Support Claude's streaming-json output mode, ACP for better progress monitoring
 
 ## See also
 
