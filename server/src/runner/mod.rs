@@ -66,7 +66,6 @@ pub enum RunnerError {
 pub enum FailureKind {
     Framing,
     Protocol,
-    Internal,
 }
 
 #[async_trait]
@@ -84,7 +83,7 @@ pub(crate) fn create_runner(runner_type: RunnerType) -> Arc<dyn Runner> {
     match runner_type {
         RunnerType::Generic => Arc::new(GenericRunner),
         RunnerType::StreamJson => Arc::new(StreamJsonRunner),
-        RunnerType::Acp => Arc::new(AcpRunner::new()),
+        RunnerType::Acp => Arc::new(AcpRunner),
     }
 }
 
@@ -429,7 +428,7 @@ echo '{"type":"result","result":"final answer"}'
     #[tokio::test]
     #[ignore = "requires claude-agent-acp"]
     async fn acp_runner_with_real_claude_agent_acp() {
-        let runner = AcpRunner::new();
+        let runner = AcpRunner;
         let result = runner
             .run(
                 &["claude-agent-acp".into()],

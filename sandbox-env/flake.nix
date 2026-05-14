@@ -46,7 +46,11 @@
           name = "wikidesk-env";
           targetPkgs = pkgs: with pkgs; [
             llm-agents-pkgs.claude-code
-            llm-agents-pkgs.claude-code-acp
+            llm-agents-pkgs.claude-agent-acp
+            llm-agents-pkgs.pi
+
+            ast-grep
+            ripgrep
             git
             cacert
             jq
