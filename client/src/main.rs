@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use clap::{Parser, Subcommand};
 use wikidesk_shared::{
-    FileEntry, ResearchRequest, ResearchResponse, SyncRequest, SyncResponse, apply_sync,
+    FileEntry, ResearchRequest, ResearchResponse, SyncPlan, SyncRequest, SyncResponse, SyncSummary,
     snapshot_dir,
 };
 
@@ -64,28 +64,10 @@ impl<T: WikideskTransport> ClientApp<T> {
     async fn sync(&self) -> anyhow::Result<SyncSummary> {
         let local_files = snapshot_dir(&self.wiki_path)?;
         let sync = self.transport.sync(local_files).await?;
-        let summary = SyncSummary::from_response(&sync);
-        apply_sync(&self.wiki_path, &sync)?;
+        let plan = SyncPlan::new(sync);
+        let summary = plan.summary();
+        plan.apply(&self.wiki_path)?;
         Ok(summary)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SyncSummary {
-    updated: usize,
-    deleted: usize,
-}
-
-impl SyncSummary {
-    fn from_response(sync: &SyncResponse) -> Self {
-        Self {
-            updated: sync.upserts.len(),
-            deleted: sync.deletes.len(),
-        }
-    }
-
-    fn total(self) -> usize {
-        self.updated + self.deleted
     }
 }
 
@@ -303,13 +285,14 @@ mod tests {
 
     #[test]
     fn sync_summary_counts_delta() {
-        let summary = SyncSummary::from_response(&SyncResponse {
+        let summary = SyncPlan::new(SyncResponse {
             upserts: vec![FileContent {
                 path: "a.md".into(),
                 content: "a".into(),
             }],
             deletes: vec!["b.md".into(), "c.md".into()],
-        });
+        })
+        .summary();
 
         assert_eq!(
             summary,

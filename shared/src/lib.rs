@@ -41,6 +41,47 @@ pub struct FileContent {
     pub content: String,
 }
 
+pub struct SyncPlan {
+    response: SyncResponse,
+}
+
+impl SyncPlan {
+    pub fn new(response: SyncResponse) -> Self {
+        Self { response }
+    }
+
+    pub fn response(&self) -> &SyncResponse {
+        &self.response
+    }
+
+    pub fn into_response(self) -> SyncResponse {
+        self.response
+    }
+
+    pub fn summary(&self) -> SyncSummary {
+        SyncSummary {
+            updated: self.response.upserts.len(),
+            deleted: self.response.deletes.len(),
+        }
+    }
+
+    pub fn apply(&self, wiki_path: &Path) -> Result<(), WikiSyncError> {
+        apply_sync_plan(wiki_path, self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncSummary {
+    pub updated: usize,
+    pub deleted: usize,
+}
+
+impl SyncSummary {
+    pub fn total(self) -> usize {
+        self.updated + self.deleted
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WikiFile {
     pub path: String,
@@ -168,11 +209,16 @@ pub fn compute_sync(
         .map(|f| f.path.clone())
         .collect();
 
-    Ok(SyncResponse { upserts, deletes })
+    Ok(SyncPlan::new(SyncResponse { upserts, deletes }).into_response())
 }
 
 /// Applies a server-to-client wiki sync delta to the local wiki directory.
 pub fn apply_sync(wiki_path: &Path, sync: &SyncResponse) -> Result<(), WikiSyncError> {
+    SyncPlan::new(sync.clone()).apply(wiki_path)
+}
+
+fn apply_sync_plan(wiki_path: &Path, plan: &SyncPlan) -> Result<(), WikiSyncError> {
+    let sync = plan.response();
     std::fs::create_dir_all(wiki_path)
         .map_err(|source| WikiSyncError::io(wiki_path.display().to_string(), source))?;
     let wiki_canonical = wiki_path
