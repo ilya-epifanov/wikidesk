@@ -1,8 +1,11 @@
-use std::collections::HashSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::PathBuf;
 
+use async_trait::async_trait;
 use clap::{Parser, Subcommand};
-use wikidesk_shared::{ResearchRequest, ResearchResponse, SyncRequest, SyncResponse, snapshot_dir};
+use wikidesk_shared::{
+    FileEntry, ResearchRequest, ResearchResponse, SyncRequest, SyncResponse, apply_sync,
+    snapshot_dir,
+};
 
 #[derive(Parser)]
 #[command(name = "wikidesk", about = "CLI client for wikidesk server")]
@@ -43,6 +46,109 @@ impl ClientConfig {
     }
 }
 
+struct ClientApp<T> {
+    transport: T,
+    wiki_path: PathBuf,
+}
+
+impl<T: WikideskTransport> ClientApp<T> {
+    async fn research(&self, question: String) -> anyhow::Result<String> {
+        let result = self
+            .transport
+            .research(question, self.wiki_path.to_string_lossy().into_owned())
+            .await?;
+        self.sync().await?;
+        Ok(result.answer)
+    }
+
+    async fn sync(&self) -> anyhow::Result<SyncSummary> {
+        let local_files = snapshot_dir(&self.wiki_path)?;
+        let sync = self.transport.sync(local_files).await?;
+        let summary = SyncSummary::from_response(&sync);
+        apply_sync(&self.wiki_path, &sync)?;
+        Ok(summary)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SyncSummary {
+    updated: usize,
+    deleted: usize,
+}
+
+impl SyncSummary {
+    fn from_response(sync: &SyncResponse) -> Self {
+        Self {
+            updated: sync.upserts.len(),
+            deleted: sync.deletes.len(),
+        }
+    }
+
+    fn total(self) -> usize {
+        self.updated + self.deleted
+    }
+}
+
+#[async_trait]
+trait WikideskTransport {
+    async fn research(
+        &self,
+        question: String,
+        wiki_path: String,
+    ) -> anyhow::Result<ResearchResponse>;
+    async fn sync(&self, files: Vec<FileEntry>) -> anyhow::Result<SyncResponse>;
+}
+
+struct HttpTransport {
+    server_url: String,
+    client: reqwest::Client,
+}
+
+impl HttpTransport {
+    fn new(server_url: String) -> anyhow::Result<Self> {
+        // Research can run for up to 30 minutes; pad to avoid client-side timeout.
+        const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(35 * 60);
+        let client = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()?;
+        Ok(Self { server_url, client })
+    }
+}
+
+#[async_trait]
+impl WikideskTransport for HttpTransport {
+    async fn research(
+        &self,
+        question: String,
+        wiki_path: String,
+    ) -> anyhow::Result<ResearchResponse> {
+        Ok(self
+            .client
+            .post(format!("{}/api/research", self.server_url))
+            .json(&ResearchRequest {
+                question,
+                wiki_path,
+            })
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+
+    async fn sync(&self, files: Vec<FileEntry>) -> anyhow::Result<SyncResponse> {
+        Ok(self
+            .client
+            .post(format!("{}/api/sync", self.server_url))
+            .json(&SyncRequest { files })
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Process env > .env.local > .env. dotenvy skips vars that are already set,
@@ -52,31 +158,17 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
     let config = ClientConfig::from_env()?;
-    // Research can run for up to 30 minutes; pad to avoid client-side timeout.
-    const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(35 * 60);
-    let client = reqwest::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .build()?;
+    let app = ClientApp {
+        transport: HttpTransport::new(config.server_url)?,
+        wiki_path: config.wiki_path,
+    };
 
     match cli.command {
         Command::Research { question } => {
-            let wiki_path_str = config.wiki_path.to_string_lossy().into_owned();
-            let result: ResearchResponse = client
-                .post(format!("{}/api/research", config.server_url))
-                .json(&ResearchRequest {
-                    question,
-                    wiki_path: wiki_path_str,
-                })
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
-            run_sync(&client, &config).await?;
-            print!("{}", result.answer);
+            print!("{}", app.research(question).await?);
         }
         Command::Sync => {
-            run_sync(&client, &config).await?;
+            print_sync_summary(app.sync().await?);
         }
     }
 
@@ -91,81 +183,141 @@ fn load_dotenv(name: &str, result: dotenvy::Result<PathBuf>) {
     }
 }
 
-async fn run_sync(client: &reqwest::Client, config: &ClientConfig) -> anyhow::Result<()> {
-    let local_files = snapshot_dir(&config.wiki_path)?;
-    let sync: SyncResponse = client
-        .post(format!("{}/api/sync", config.server_url))
-        .json(&SyncRequest { files: local_files })
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    apply_sync(&config.wiki_path, &sync)?;
-
-    let total = sync.upserts.len() + sync.deletes.len();
-    if total > 0 {
+fn print_sync_summary(summary: SyncSummary) {
+    if summary.total() > 0 {
         eprintln!(
             "sync: {} updated, {} deleted",
-            sync.upserts.len(),
-            sync.deletes.len()
+            summary.updated, summary.deleted
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use wikidesk_shared::FileContent;
+
+    #[derive(Default)]
+    struct FakeTransport {
+        research_calls: Arc<Mutex<Vec<(String, String)>>>,
+        sync_calls: Arc<Mutex<usize>>,
+        research_response: Option<ResearchResponse>,
+        sync_response: Option<SyncResponse>,
+    }
+
+    #[async_trait]
+    impl WikideskTransport for FakeTransport {
+        async fn research(
+            &self,
+            question: String,
+            wiki_path: String,
+        ) -> anyhow::Result<ResearchResponse> {
+            self.research_calls
+                .lock()
+                .unwrap()
+                .push((question, wiki_path));
+            Ok(self.research_response.clone().unwrap())
+        }
+
+        async fn sync(&self, _files: Vec<FileEntry>) -> anyhow::Result<SyncResponse> {
+            *self.sync_calls.lock().unwrap() += 1;
+            Ok(self.sync_response.clone().unwrap_or(SyncResponse {
+                upserts: vec![],
+                deletes: vec![],
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn research_submits_question_then_syncs_wiki() {
+        let dir = tempfile::tempdir().unwrap();
+        let wiki = dir.path().join("wiki");
+        let transport = FakeTransport {
+            research_response: Some(ResearchResponse {
+                answer: "answer".into(),
+            }),
+            sync_response: Some(SyncResponse {
+                upserts: vec![FileContent {
+                    path: "notes.md".into(),
+                    content: "# Notes".into(),
+                }],
+                deletes: vec![],
+            }),
+            ..Default::default()
+        };
+        let research_calls = transport.research_calls.clone();
+        let sync_calls = transport.sync_calls.clone();
+        let app = ClientApp {
+            transport,
+            wiki_path: wiki.clone(),
+        };
+
+        let answer = app.research("question?".into()).await.unwrap();
+
+        assert_eq!(answer, "answer");
+        assert_eq!(
+            research_calls.lock().unwrap().as_slice(),
+            &[("question?".into(), wiki.to_string_lossy().into_owned())]
+        );
+        assert_eq!(*sync_calls.lock().unwrap(), 1);
+        assert_eq!(
+            std::fs::read_to_string(wiki.join("notes.md")).unwrap(),
+            "# Notes"
         );
     }
 
-    Ok(())
-}
-
-fn validate_relative_path(relative: &str) -> anyhow::Result<()> {
-    for component in Path::new(relative).components() {
-        match component {
-            Component::ParentDir => {
-                anyhow::bail!("server sent path with '..': '{relative}'")
-            }
-            Component::RootDir | Component::Prefix(_) => {
-                anyhow::bail!("server sent absolute path: '{relative}'")
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-fn resolve_and_validate(wiki_canonical: &Path, relative: &str) -> anyhow::Result<PathBuf> {
-    validate_relative_path(relative)?;
-    // Since relative is validated to have no ".." or absolute components,
-    // joining it to the canonical base cannot escape.
-    let target = wiki_canonical.join(relative);
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    Ok(target)
-}
-
-fn apply_sync(wiki_path: &Path, sync: &SyncResponse) -> anyhow::Result<()> {
-    std::fs::create_dir_all(wiki_path)?;
-    let wiki_canonical = wiki_path.canonicalize()?;
-    for file in &sync.upserts {
-        let target = resolve_and_validate(&wiki_canonical, &file.path)?;
-        std::fs::write(&target, &file.content)?;
-    }
-
-    let upserted: HashSet<&str> = sync.upserts.iter().map(|f| f.path.as_str()).collect();
-    for path in &sync.deletes {
-        if upserted.contains(path.as_str()) {
-            continue;
-        }
-        validate_relative_path(path)?;
-        let target = wiki_canonical.join(path);
-        let canonical = match target.canonicalize() {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e.into()),
+    #[tokio::test]
+    async fn sync_returns_summary_and_applies_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let wiki = dir.path().join("wiki");
+        std::fs::create_dir_all(&wiki).unwrap();
+        std::fs::write(wiki.join("old.md"), "old").unwrap();
+        let transport = FakeTransport {
+            sync_response: Some(SyncResponse {
+                upserts: vec![FileContent {
+                    path: "new.md".into(),
+                    content: "new".into(),
+                }],
+                deletes: vec!["old.md".into()],
+            }),
+            ..Default::default()
         };
-        if !canonical.starts_with(&wiki_canonical) {
-            anyhow::bail!("resolved path escapes wiki directory: '{path}'");
-        }
-        std::fs::remove_file(&target)?;
+        let app = ClientApp {
+            transport,
+            wiki_path: wiki.clone(),
+        };
+
+        let summary = app.sync().await.unwrap();
+
+        assert_eq!(
+            summary,
+            SyncSummary {
+                updated: 1,
+                deleted: 1
+            }
+        );
+        assert_eq!(std::fs::read_to_string(wiki.join("new.md")).unwrap(), "new");
+        assert!(!wiki.join("old.md").exists());
     }
 
-    Ok(())
+    #[test]
+    fn sync_summary_counts_delta() {
+        let summary = SyncSummary::from_response(&SyncResponse {
+            upserts: vec![FileContent {
+                path: "a.md".into(),
+                content: "a".into(),
+            }],
+            deletes: vec!["b.md".into(), "c.md".into()],
+        });
+
+        assert_eq!(
+            summary,
+            SyncSummary {
+                updated: 1,
+                deleted: 2
+            }
+        );
+        assert_eq!(summary.total(), 3);
+    }
 }
