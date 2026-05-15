@@ -2,9 +2,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tracing::{error, instrument};
+use tracing::instrument;
 
-use super::{Runner, RunnerError, build_command, capture_stderr, substitute_prompt};
+use super::{AgentProcess, Runner, RunnerError, substitute_prompt};
 
 pub struct GenericRunner;
 
@@ -19,26 +19,12 @@ impl Runner for GenericRunner {
         timeout: Duration,
     ) -> Result<Option<String>, RunnerError> {
         let args = substitute_prompt(command, prompt);
-        let mut child = build_command(&args, working_dir)
-            .spawn()
-            .map_err(RunnerError::Spawn)?;
-        let stderr_buf = capture_stderr(&mut child);
-
-        let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-            Ok(result) => result.map_err(|source| RunnerError::Io {
-                op: "waiting for child",
-                source,
-            })?,
-            Err(_) => {
-                error!(stderr = %stderr_buf.render(), "agent timed out");
-                return Err(RunnerError::Timeout {
-                    secs: timeout.as_secs(),
-                });
-            }
-        };
+        let process = AgentProcess::spawn(&args, working_dir)?;
+        let stderr_buf = process.stderr.clone();
+        let output = process.wait_for_output(timeout).await?;
 
         if !output.status.success() {
-            error!(stderr = %stderr_buf.render(), "agent exited with failure");
+            tracing::error!(stderr = %stderr_buf.render(), "agent exited with failure");
             let exit_code = output.status.code().unwrap_or(-1);
             return Err(RunnerError::Exited { exit_code });
         }

@@ -6,8 +6,8 @@ use serde::Serialize;
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::time::Instant;
 
-use crate::config::{self, AppConfig};
-use crate::runner::{self, Runner};
+use crate::config::AppConfig;
+use crate::runner::Runner;
 
 #[derive(Debug, thiserror::Error)]
 #[error("research queue is full")]
@@ -50,7 +50,7 @@ impl AppState {
 
     pub fn new(config: AppConfig) -> (Self, mpsc::Receiver<String>) {
         let (tx, rx) = mpsc::channel(Self::QUEUE_CAPACITY);
-        let runner = runner::create_runner(config.runner);
+        let runner = config.create_runner_adapter();
         let state = Self {
             config,
             runner,
@@ -83,6 +83,14 @@ impl AppState {
             .map(|t| t.status.borrow().clone())
     }
 
+    pub async fn submit_and_wait(
+        &self,
+        question: String,
+    ) -> Result<Option<TaskStatus>, QueueFullError> {
+        let id = self.enqueue(question).await?;
+        Ok(self.wait_for_result(&id).await)
+    }
+
     pub async fn wait_for_result(&self, id: &str) -> Option<TaskStatus> {
         let mut rx = {
             let tasks = self.tasks.lock().await;
@@ -91,7 +99,7 @@ impl AppState {
         loop {
             {
                 let status = rx.borrow_and_update();
-                if matches!(*status, TaskStatus::Done { .. } | TaskStatus::Failed { .. }) {
+                if status.is_terminal() {
                     return Some(status.clone());
                 }
             }
@@ -124,6 +132,37 @@ impl AppState {
                 .is_none_or(|completed| now.duration_since(completed) < ttl)
         });
     }
+
+    async fn execute_queued_task(self: Arc<Self>, task_id: String) {
+        let _permit = self.research_semaphore.acquire().await.unwrap();
+        let question = match self.start_task(&task_id).await {
+            Some(q) => q,
+            None => return,
+        };
+        let prompt = self.config.build_research_prompt(&question);
+        let run = self.runner.run(
+            &self.config.agent_command,
+            &prompt,
+            &self.config.wiki_repo,
+            self.config.agent_timeout,
+        );
+        let status = match run.await {
+            Ok(Some(answer)) => TaskStatus::Done { answer },
+            Ok(None) => TaskStatus::Failed {
+                error: "agent produced no output".to_string(),
+            },
+            Err(e) => TaskStatus::Failed {
+                error: format!("{e:#}"),
+            },
+        };
+        self.finish_task(&task_id, status).await;
+    }
+}
+
+impl TaskStatus {
+    fn is_terminal(&self) -> bool {
+        matches!(self, TaskStatus::Done { .. } | TaskStatus::Failed { .. })
+    }
 }
 
 pub async fn run_reaper(state: Arc<AppState>) {
@@ -138,51 +177,7 @@ pub async fn run_reaper(state: Arc<AppState>) {
 
 pub async fn run_worker(state: Arc<AppState>, mut rx: mpsc::Receiver<String>) {
     while let Some(task_id) = rx.recv().await {
-        let state = state.clone();
-        tokio::spawn(async move {
-            let _permit = state.research_semaphore.acquire().await.unwrap();
-            let question = match state.start_task(&task_id).await {
-                Some(q) => q,
-                None => return,
-            };
-            let prompt = state
-                .config
-                .prompt_template_content
-                .replace(config::QUESTION_PLACEHOLDER, &question);
-            let run = state.runner.run(
-                &state.config.agent_command,
-                &prompt,
-                &state.config.wiki_repo,
-                state.config.agent_timeout,
-            );
-            match run.await {
-                Ok(Some(answer)) => {
-                    state
-                        .finish_task(&task_id, TaskStatus::Done { answer })
-                        .await;
-                }
-                Ok(None) => {
-                    state
-                        .finish_task(
-                            &task_id,
-                            TaskStatus::Failed {
-                                error: "agent produced no output".to_string(),
-                            },
-                        )
-                        .await;
-                }
-                Err(e) => {
-                    state
-                        .finish_task(
-                            &task_id,
-                            TaskStatus::Failed {
-                                error: format!("{e:#}"),
-                            },
-                        )
-                        .await;
-                }
-            }
-        });
+        tokio::spawn(state.clone().execute_queued_task(task_id));
     }
 }
 

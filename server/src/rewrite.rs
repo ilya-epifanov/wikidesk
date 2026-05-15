@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use regex::Regex;
+use wikidesk_shared::walk_markdown_files;
 
 static WIKILINK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
 
@@ -11,62 +12,85 @@ enum PageEntry {
     Ambiguous,
 }
 
-fn build_page_map(wiki_dir: &Path) -> std::io::Result<HashMap<String, PageEntry>> {
-    let mut map = HashMap::new();
-    visit_dir(wiki_dir, wiki_dir, &mut map)?;
-    Ok(map)
+/// Resolves and renders wiki-style links for answers returned by a research agent.
+pub struct WikiLinkResolver {
+    page_map: HashMap<String, PageEntry>,
 }
 
-fn visit_dir(base: &Path, dir: &Path, map: &mut HashMap<String, PageEntry>) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if entry.file_type()?.is_dir() {
-            visit_dir(base, &path, map)?;
-        } else if path.extension().is_some_and(|e| e == "md")
-            && let Some(stem) = path.file_stem()
-        {
-            let key = stem.to_string_lossy().to_lowercase();
-            let rel = path.strip_prefix(base).unwrap().to_path_buf();
-            map.entry(key)
-                .and_modify(|entry| {
-                    if let PageEntry::Unique(existing) = entry {
-                        tracing::warn!(
-                            existing = %existing.display(),
-                            duplicate = %rel.display(),
-                            "duplicate page stem, leaving wikilink unresolved",
-                        );
-                        *entry = PageEntry::Ambiguous;
-                    }
-                })
-                .or_insert(PageEntry::Unique(rel));
-        }
+impl WikiLinkResolver {
+    pub fn from_repo(wiki_repo: &Path) -> std::io::Result<Self> {
+        let wiki_dir = wiki_repo.join("wiki");
+        Self::from_wiki_dir(&wiki_dir)
     }
-    Ok(())
+
+    fn from_wiki_dir(wiki_dir: &Path) -> std::io::Result<Self> {
+        if !wiki_dir.exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("wiki directory '{}' not found", wiki_dir.display()),
+            ));
+        }
+        let mut page_map = HashMap::new();
+        for file in
+            walk_markdown_files(wiki_dir).map_err(|e| std::io::Error::other(e.to_string()))?
+        {
+            if let Some(stem) = file.absolute_path.file_stem() {
+                let key = stem.to_string_lossy().to_lowercase();
+                let rel = PathBuf::from(file.path);
+                page_map
+                    .entry(key)
+                    .and_modify(|entry| {
+                        if let PageEntry::Unique(existing) = entry {
+                            tracing::warn!(
+                                existing = %existing.display(),
+                                duplicate = %rel.display(),
+                                "duplicate page stem, leaving wikilink unresolved",
+                            );
+                            *entry = PageEntry::Ambiguous;
+                        }
+                    })
+                    .or_insert(PageEntry::Unique(rel));
+            }
+        }
+        Ok(Self { page_map })
+    }
+
+    pub fn render_markdown_links(&self, text: &str, link_prefix: &str) -> String {
+        WIKILINK_RE
+            .replace_all(text, |caps: &regex::Captures| {
+                let link = WikiLink::parse(&caps[1]);
+                match self.page_map.get(&link.page.to_lowercase()) {
+                    Some(PageEntry::Unique(rel_path)) => {
+                        format!("[{}]({link_prefix}/{})", link.display, rel_path.display())
+                    }
+                    Some(PageEntry::Ambiguous) | None => format!("[{}]()", link.display),
+                }
+            })
+            .into_owned()
+    }
+}
+
+struct WikiLink<'a> {
+    page: &'a str,
+    display: &'a str,
+}
+
+impl<'a> WikiLink<'a> {
+    fn parse(inner: &'a str) -> Self {
+        let (page, display) = inner.split_once('|').unwrap_or((inner, inner));
+        Self { page, display }
+    }
 }
 
 pub fn rewrite_wikilinks(text: &str, wiki_repo: &Path, link_prefix: &str) -> String {
-    let wiki_dir = wiki_repo.join("wiki");
-    let page_map = match build_page_map(&wiki_dir) {
-        Ok(m) => m,
+    let resolver = match WikiLinkResolver::from_repo(wiki_repo) {
+        Ok(resolver) => resolver,
         Err(e) => {
             tracing::warn!("failed to build page map: {e}");
             return text.to_string();
         }
     };
-
-    WIKILINK_RE
-        .replace_all(text, |caps: &regex::Captures| {
-            let inner = &caps[1];
-            let (page, display) = inner.split_once('|').unwrap_or((inner, inner));
-            match page_map.get(&page.to_lowercase()) {
-                Some(PageEntry::Unique(rel_path)) => {
-                    format!("[{display}]({link_prefix}/{})", rel_path.display())
-                }
-                Some(PageEntry::Ambiguous) | None => format!("[{display}]()"),
-            }
-        })
-        .into_owned()
+    resolver.render_markdown_links(text, link_prefix)
 }
 
 #[cfg(test)]
@@ -198,6 +222,22 @@ mod tests {
         assert_eq!(
             result,
             "See [RLHF](/home/user/notes/concepts/RLHF.md) and [alignment](/home/user/notes/topics/alignment.md)."
+        );
+    }
+
+    #[test]
+    fn resolver_reuses_page_map_across_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_wiki(dir.path());
+        let resolver = WikiLinkResolver::from_repo(dir.path()).unwrap();
+
+        assert_eq!(
+            resolver.render_markdown_links("[[RLHF]]", "wiki"),
+            "[RLHF](wiki/concepts/RLHF.md)"
+        );
+        assert_eq!(
+            resolver.render_markdown_links("[[DPO]]", "wiki"),
+            "[DPO](wiki/concepts/DPO.md)"
         );
     }
 }

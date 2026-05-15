@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 mod api;
 mod config;
+mod delivery;
 mod queue;
 mod rewrite;
 mod runner;
@@ -39,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
         "starting wikidesk",
     );
 
-    let bind_addr = cfg.bind_addr;
+    let bind_addr = cfg.bind_addr();
     let (app_state, rx) = queue::AppState::new(cfg);
     let state = Arc::new(app_state);
 

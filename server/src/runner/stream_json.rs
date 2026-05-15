@@ -6,10 +6,7 @@ use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tracing::{debug, error, instrument};
 
-use super::{
-    FailureKind, Runner, RunnerError, StderrCapture, build_command, capture_stderr,
-    substitute_prompt,
-};
+use super::{AgentProcess, FailureKind, Runner, RunnerError, substitute_prompt};
 
 #[derive(Debug, thiserror::Error)]
 enum StreamJsonError {
@@ -112,14 +109,16 @@ impl Runner for StreamJsonRunner {
         timeout: Duration,
     ) -> Result<Option<String>, RunnerError> {
         let args = substitute_prompt(command, prompt);
-        let mut child = build_command(&args, working_dir)
-            .spawn()
-            .map_err(RunnerError::Spawn)?;
-        let stdout = child.stdout.take().expect("stdout piped by build_command");
-        let stderr_buf = capture_stderr(&mut child);
+        let mut process = AgentProcess::spawn(&args, working_dir)?;
+        let stdout = process
+            .child
+            .stdout
+            .take()
+            .expect("stdout piped by AgentProcess::spawn");
+        let stderr_buf = process.stderr.clone();
 
         let parse_result =
-            tokio::time::timeout(timeout, parse_stream_json(stdout, &mut child, &stderr_buf)).await;
+            tokio::time::timeout(timeout, parse_stream_json(stdout, &mut process)).await;
 
         match parse_result {
             Ok(result) => result,
@@ -135,8 +134,7 @@ impl Runner for StreamJsonRunner {
 
 async fn parse_stream_json(
     stdout: tokio::process::ChildStdout,
-    child: &mut tokio::process::Child,
-    stderr_buf: &StderrCapture,
+    process: &mut AgentProcess,
 ) -> Result<Option<String>, RunnerError> {
     let reader = BufReader::new(stdout);
     let mut lines = reader.lines();
@@ -152,7 +150,7 @@ async fn parse_stream_json(
         }
 
         let event: Event = serde_json::from_str(&line).map_err(|e| {
-            error!(stderr = %stderr_buf.render(), "invalid JSON in stream");
+            error!(stderr = %process.stderr.render(), "invalid JSON in stream");
             StreamJsonError::InvalidJson(e)
         })?;
 
@@ -182,7 +180,7 @@ async fn parse_stream_json(
             }
             Event::Error(err) => {
                 let message = err.message().to_string();
-                error!(stderr = %stderr_buf.render(), message = %message, "agent reported error");
+                error!(stderr = %process.stderr.render(), message = %message, "agent reported error");
                 return Err(StreamJsonError::Agent(message).into());
             }
             Event::Unknown => {
@@ -191,15 +189,7 @@ async fn parse_stream_json(
         }
     }
 
-    let status = child.wait().await.map_err(|source| RunnerError::Io {
-        op: "waiting for child",
-        source,
-    })?;
-    if !status.success() {
-        error!(stderr = %stderr_buf.render(), "agent exited with failure");
-        let exit_code = status.code().unwrap_or(-1);
-        return Err(RunnerError::Exited { exit_code });
-    }
+    process.wait_for_success().await?;
 
     Ok(final_result.or((!accumulated_text.is_empty()).then_some(accumulated_text)))
 }

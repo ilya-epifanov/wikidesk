@@ -8,10 +8,7 @@ use async_trait::async_trait;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{debug, error, instrument};
 
-use super::{
-    FailureKind, Runner, RunnerError, StderrCapture, build_command, capture_stderr,
-    substitute_prompt,
-};
+use super::{AgentProcess, FailureKind, Runner, RunnerError, StderrCapture, substitute_prompt};
 
 #[derive(Debug, Clone, Copy, strum::Display)]
 #[strum(serialize_all = "snake_case")]
@@ -57,14 +54,15 @@ impl Runner for AcpRunner {
         timeout: Duration,
     ) -> Result<Option<String>, RunnerError> {
         let args = substitute_prompt(command, prompt);
-        let mut child = build_command(&args, working_dir)
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .map_err(RunnerError::Spawn)?;
+        let mut process = AgentProcess::spawn_with_stdin(&args, working_dir)?;
 
-        let stdin = child.stdin.take().expect("stdin piped");
-        let stdout = child.stdout.take().expect("stdout piped by build_command");
-        let stderr_buf = capture_stderr(&mut child);
+        let stdin = process.child.stdin.take().expect("stdin piped");
+        let stdout = process
+            .child
+            .stdout
+            .take()
+            .expect("stdout piped by AgentProcess::spawn_with_stdin");
+        let stderr_buf = process.stderr.clone();
 
         let collected_text = Arc::new(Mutex::new(String::new()));
         let transport = acp::ByteStreams::new(stdin.compat_write(), stdout.compat());
@@ -106,7 +104,7 @@ impl Runner for AcpRunner {
 
         // DECISION: `kill().await` sends SIGKILL and reaps before return.
         // `kill_on_drop` only schedules the signal, leaving a brief zombie window.
-        let _ = child.kill().await;
+        process.kill().await;
 
         outcome
             .map_err(|_| {

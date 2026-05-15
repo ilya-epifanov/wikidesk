@@ -13,8 +13,8 @@ use rmcp::{
     tool, tool_router,
 };
 
+use crate::delivery::{self, DeliveryError};
 use crate::queue::{AppState, TaskStatus};
-use crate::rewrite;
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ResearchParams {
@@ -37,7 +37,7 @@ pub struct ResearchServer {
 impl ResearchServer {
     pub fn new(state: Arc<AppState>) -> Self {
         let mut tool_router = Self::tool_router();
-        if let Some(desc) = &state.config.research_tool_description
+        if let Some(desc) = state.config.research_tool_description()
             && let Some(route) = tool_router.map.get_mut("research")
         {
             let base = route.attr.description.as_deref().unwrap_or_default();
@@ -72,18 +72,18 @@ impl ResearchServer {
     ) -> Result<String, ErrorData> {
         match self.state.get_task_status(&params.task_id).await {
             Some(TaskStatus::Done { answer }) => {
-                let wiki_repo = self.state.config.wiki_repo.clone();
-                let answer = tokio::task::spawn_blocking(move || {
-                    rewrite::rewrite_wikilinks(&answer, &wiki_repo, "wiki")
-                })
+                let answer = delivery::deliver_answer(
+                    Some(TaskStatus::Done { answer }),
+                    self.state.config.wiki_repo.clone(),
+                    "wiki".to_string(),
+                )
                 .await
-                .map_err(|e| ErrorData::internal_error(format!("{e:#}"), None))?;
+                .map_err(mcp_delivery_error)?;
                 Ok(serde_json::json!({ "status": "done", "answer": answer }).to_string())
             }
-            Some(TaskStatus::Failed { error }) => Err(ErrorData::internal_error(
-                format!("research failed: {error}"),
-                None,
-            )),
+            Some(TaskStatus::Failed { error }) => {
+                Err(mcp_delivery_error(DeliveryError::ResearchFailed(error)))
+            }
             Some(status) => Ok(serde_json::to_string(&status).unwrap()),
             None => Err(ErrorData::resource_not_found(
                 format!("unknown task_id '{}'", params.task_id),
@@ -93,11 +93,13 @@ impl ResearchServer {
     }
 }
 
+fn mcp_delivery_error(err: DeliveryError) -> ErrorData {
+    ErrorData::internal_error(err.to_string(), None)
+}
+
 impl ServerHandler for ResearchServer {
     fn get_info(&self) -> ServerInfo {
-        let instructions = self.state.config.instructions.as_deref().unwrap_or(
-            "Research server: use 'research' to submit questions, 'get_result' to poll results.",
-        );
+        let instructions = self.state.config.mcp_instructions();
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(instructions)
     }

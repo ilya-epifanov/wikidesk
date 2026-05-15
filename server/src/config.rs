@@ -1,10 +1,11 @@
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::runner::RunnerType;
+use crate::runner::{self, Runner, RunnerType};
 
 #[derive(Deserialize)]
 struct RawConfig {
@@ -91,7 +92,68 @@ fn resolve(base: &Path, path: PathBuf) -> PathBuf {
     }
 }
 
+fn validate_agent_command(runner: RunnerType, agent_command: &[String]) -> Result<(), ConfigError> {
+    if agent_command.is_empty() {
+        return Err(ConfigError::AgentCommandEmpty);
+    }
+    let prompt_count = agent_command
+        .iter()
+        .filter(|a| a.as_str() == PROMPT_PLACEHOLDER)
+        .count();
+    if runner.requires_prompt_placeholder() {
+        if prompt_count != 1 {
+            return Err(ConfigError::AgentCommandMissingPrompt);
+        }
+    } else if prompt_count != 0 {
+        return Err(ConfigError::AgentCommandUnexpectedPrompt);
+    }
+    Ok(())
+}
+
+fn load_prompt_template(prompt_template: &Path) -> Result<String, ConfigError> {
+    let prompt_template_content = std::fs::read_to_string(prompt_template).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ConfigError::PromptTemplateMissing(prompt_template.to_path_buf())
+        } else {
+            ConfigError::Io(prompt_template.to_path_buf(), e)
+        }
+    })?;
+    if !prompt_template_content.contains(QUESTION_PLACEHOLDER) {
+        return Err(ConfigError::PromptTemplateMissingPlaceholder(
+            prompt_template.to_path_buf(),
+        ));
+    }
+    Ok(prompt_template_content)
+}
+
 impl AppConfig {
+    pub fn wiki_dir(&self) -> PathBuf {
+        self.wiki_repo.join("wiki")
+    }
+
+    pub fn bind_addr(&self) -> SocketAddr {
+        self.bind_addr
+    }
+
+    pub fn build_research_prompt(&self, question: &str) -> String {
+        self.prompt_template_content
+            .replace(QUESTION_PLACEHOLDER, question)
+    }
+
+    pub fn create_runner_adapter(&self) -> Arc<dyn Runner> {
+        runner::create_runner(self.runner)
+    }
+
+    pub fn mcp_instructions(&self) -> &str {
+        self.instructions.as_deref().unwrap_or(
+            "Research server: use 'research' to submit questions, 'get_result' to poll results.",
+        )
+    }
+
+    pub fn research_tool_description(&self) -> Option<&str> {
+        self.research_tool_description.as_deref()
+    }
+
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let config_dir = path
             .canonicalize()
@@ -119,21 +181,7 @@ impl AppConfig {
                 )
             })?;
 
-        if raw.agent_command.is_empty() {
-            return Err(ConfigError::AgentCommandEmpty);
-        }
-        let prompt_count = raw
-            .agent_command
-            .iter()
-            .filter(|a| a.as_str() == PROMPT_PLACEHOLDER)
-            .count();
-        if raw.runner.requires_prompt_placeholder() {
-            if prompt_count != 1 {
-                return Err(ConfigError::AgentCommandMissingPrompt);
-            }
-        } else if prompt_count != 0 {
-            return Err(ConfigError::AgentCommandUnexpectedPrompt);
-        }
+        validate_agent_command(raw.runner, &raw.agent_command)?;
 
         if !wiki_repo.exists() {
             return Err(ConfigError::WikiRepoMissing(wiki_repo));
@@ -141,18 +189,7 @@ impl AppConfig {
         if !wiki_repo.join("wiki").exists() {
             return Err(ConfigError::WikiDirMissing(wiki_repo));
         }
-        let prompt_template_content = std::fs::read_to_string(&prompt_template).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                ConfigError::PromptTemplateMissing(prompt_template.clone())
-            } else {
-                ConfigError::Io(prompt_template.clone(), e)
-            }
-        })?;
-        if !prompt_template_content.contains(QUESTION_PLACEHOLDER) {
-            return Err(ConfigError::PromptTemplateMissingPlaceholder(
-                prompt_template,
-            ));
-        }
+        let prompt_template_content = load_prompt_template(&prompt_template)?;
 
         Ok(AppConfig {
             wiki_repo,

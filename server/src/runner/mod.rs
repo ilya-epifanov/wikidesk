@@ -97,6 +97,66 @@ pub(super) fn build_command(args: &[&str], working_dir: &Path) -> tokio::process
     cmd
 }
 
+pub(super) struct AgentProcess {
+    pub child: tokio::process::Child,
+    pub stderr: StderrCapture,
+}
+
+impl AgentProcess {
+    pub fn spawn(args: &[&str], working_dir: &Path) -> Result<Self, RunnerError> {
+        let mut child = build_command(args, working_dir)
+            .spawn()
+            .map_err(RunnerError::Spawn)?;
+        let stderr = capture_stderr(&mut child);
+        Ok(Self { child, stderr })
+    }
+
+    pub fn spawn_with_stdin(args: &[&str], working_dir: &Path) -> Result<Self, RunnerError> {
+        let mut child = build_command(args, working_dir)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .map_err(RunnerError::Spawn)?;
+        let stderr = capture_stderr(&mut child);
+        Ok(Self { child, stderr })
+    }
+
+    pub async fn kill(&mut self) {
+        let _ = self.child.kill().await;
+    }
+
+    pub async fn wait_for_output(
+        self,
+        timeout: Duration,
+    ) -> Result<std::process::Output, RunnerError> {
+        let stderr = self.stderr.clone();
+        match tokio::time::timeout(timeout, self.child.wait_with_output()).await {
+            Ok(result) => result.map_err(|source| RunnerError::Io {
+                op: "waiting for child",
+                source,
+            }),
+            Err(_) => {
+                tracing::error!(stderr = %stderr.render(), "agent timed out");
+                Err(RunnerError::Timeout {
+                    secs: timeout.as_secs(),
+                })
+            }
+        }
+    }
+
+    pub async fn wait_for_success(&mut self) -> Result<(), RunnerError> {
+        let status = self.child.wait().await.map_err(|source| RunnerError::Io {
+            op: "waiting for child",
+            source,
+        })?;
+        if !status.success() {
+            tracing::error!(stderr = %self.stderr.render(), "agent exited with failure");
+            let exit_code = status.code().unwrap_or(-1);
+            return Err(RunnerError::Exited { exit_code });
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct StderrCapture(Arc<Mutex<BoundedLineBuffer>>);
 
