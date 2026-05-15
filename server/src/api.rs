@@ -4,10 +4,11 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use wikidesk_shared::{ResearchRequest, ResearchResponse, SyncRequest, SyncResponse, compute_sync};
+use wikidesk_shared::{ResearchRequest, ResearchResponse, SyncRequest, SyncResponse};
 
-use crate::delivery::{self, DeliveryError};
+use crate::delivery::DeliveryError;
 use crate::queue::{AppState, QueueFullError};
+use crate::surface::{ResearchSurface, SurfaceError};
 
 pub(crate) enum ApiError {
     Busy,
@@ -29,10 +30,11 @@ impl From<QueueFullError> for ApiError {
     }
 }
 
-impl From<DeliveryError> for ApiError {
-    fn from(err: DeliveryError) -> Self {
+impl From<SurfaceError> for ApiError {
+    fn from(err: SurfaceError) -> Self {
         match err {
-            DeliveryError::ResearchFailed(error) => Self::Internal(error),
+            SurfaceError::QueueFull(_) => Self::Busy,
+            SurfaceError::Delivery(DeliveryError::ResearchFailed(error)) => Self::Internal(error),
             other => Self::Internal(other.to_string()),
         }
     }
@@ -42,12 +44,9 @@ pub async fn research(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ResearchRequest>,
 ) -> Result<Json<ResearchResponse>, ApiError> {
-    let answer = delivery::deliver_answer(
-        state.submit_and_wait(req.question).await?,
-        state.config.wiki_repo.clone(),
-        req.wiki_path,
-    )
-    .await?;
+    let answer = ResearchSurface::new(state)
+        .research_and_deliver(req.question, req.wiki_path)
+        .await?;
     Ok(Json(ResearchResponse { answer }))
 }
 
@@ -55,10 +54,9 @@ pub async fn sync(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SyncRequest>,
 ) -> Result<Json<SyncResponse>, ApiError> {
-    let wiki_dir = state.config.wiki_dir();
-    tokio::task::spawn_blocking(move || compute_sync(&wiki_dir, &req.files))
+    ResearchSurface::new(state)
+        .compute_sync(req.files)
         .await
-        .map_err(|e| ApiError::Internal(format!("{e:#}")))?
         .map(Json)
-        .map_err(|e| ApiError::Internal(format!("{e:#}")))
+        .map_err(ApiError::from)
 }

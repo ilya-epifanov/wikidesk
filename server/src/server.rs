@@ -13,8 +13,9 @@ use rmcp::{
     tool, tool_router,
 };
 
-use crate::delivery::{self, DeliveryError};
+use crate::delivery::DeliveryError;
 use crate::queue::{AppState, TaskStatus};
+use crate::surface::{ResearchSurface, SurfaceError};
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ResearchParams {
@@ -56,9 +57,8 @@ impl ResearchServer {
         &self,
         Parameters(params): Parameters<ResearchParams>,
     ) -> Result<String, ErrorData> {
-        let task_id = self
-            .state
-            .enqueue(params.question)
+        let task_id = ResearchSurface::new(self.state.clone())
+            .submit_research(params.question)
             .await
             .map_err(|_| ErrorData::internal_error("research queue is full", None))?;
         Ok(serde_json::json!({ "task_id": task_id }).to_string())
@@ -70,15 +70,13 @@ impl ResearchServer {
         &self,
         Parameters(params): Parameters<GetResultParams>,
     ) -> Result<String, ErrorData> {
-        match self.state.get_task_status(&params.task_id).await {
+        let surface = ResearchSurface::new(self.state.clone());
+        match surface.get_status(&params.task_id).await {
             Some(TaskStatus::Done { answer }) => {
-                let answer = delivery::deliver_answer(
-                    Some(TaskStatus::Done { answer }),
-                    self.state.config.wiki_repo.clone(),
-                    "wiki".to_string(),
-                )
-                .await
-                .map_err(mcp_delivery_error)?;
+                let answer = surface
+                    .deliver(Some(TaskStatus::Done { answer }), "wiki".to_string())
+                    .await
+                    .map_err(mcp_surface_error)?;
                 Ok(serde_json::json!({ "status": "done", "answer": answer }).to_string())
             }
             Some(TaskStatus::Failed { error }) => {
@@ -93,8 +91,12 @@ impl ResearchServer {
     }
 }
 
-fn mcp_delivery_error(err: DeliveryError) -> ErrorData {
+fn mcp_surface_error(err: SurfaceError) -> ErrorData {
     ErrorData::internal_error(err.to_string(), None)
+}
+
+fn mcp_delivery_error(err: DeliveryError) -> ErrorData {
+    mcp_surface_error(SurfaceError::Delivery(err))
 }
 
 impl ServerHandler for ResearchServer {
