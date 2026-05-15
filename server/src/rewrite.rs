@@ -12,12 +12,11 @@ enum PageEntry {
     Ambiguous,
 }
 
-/// Resolves and renders wiki-style links for answers returned by a research agent.
-pub struct WikiLinkResolver {
+pub struct WikiLinkIndex {
     page_map: HashMap<String, PageEntry>,
 }
 
-impl WikiLinkResolver {
+impl WikiLinkIndex {
     pub fn from_repo(wiki_repo: &Path) -> std::io::Result<Self> {
         let wiki_dir = wiki_repo.join("wiki");
         Self::from_wiki_dir(&wiki_dir)
@@ -55,15 +54,42 @@ impl WikiLinkResolver {
         Ok(Self { page_map })
     }
 
+    fn resolve(&self, page: &str) -> LinkTarget<'_> {
+        match self.page_map.get(&page.to_lowercase()) {
+            Some(PageEntry::Unique(path)) => LinkTarget::Resolved(path),
+            Some(PageEntry::Ambiguous) => LinkTarget::Ambiguous,
+            None => LinkTarget::Missing,
+        }
+    }
+}
+
+enum LinkTarget<'a> {
+    Resolved(&'a Path),
+    Ambiguous,
+    Missing,
+}
+
+/// Renders wiki-style links for answers returned by a research agent.
+pub struct WikiLinkRenderer {
+    index: WikiLinkIndex,
+}
+
+impl WikiLinkRenderer {
+    pub fn from_repo(wiki_repo: &Path) -> std::io::Result<Self> {
+        Ok(Self {
+            index: WikiLinkIndex::from_repo(wiki_repo)?,
+        })
+    }
+
     pub fn render_markdown_links(&self, text: &str, link_prefix: &str) -> String {
         WIKILINK_RE
             .replace_all(text, |caps: &regex::Captures| {
                 let link = WikiLink::parse(&caps[1]);
-                match self.page_map.get(&link.page.to_lowercase()) {
-                    Some(PageEntry::Unique(rel_path)) => {
+                match self.index.resolve(link.page) {
+                    LinkTarget::Resolved(rel_path) => {
                         format!("[{}]({link_prefix}/{})", link.display, rel_path.display())
                     }
-                    Some(PageEntry::Ambiguous) | None => format!("[{}]()", link.display),
+                    LinkTarget::Ambiguous | LinkTarget::Missing => format!("[{}]()", link.display),
                 }
             })
             .into_owned()
@@ -83,14 +109,14 @@ impl<'a> WikiLink<'a> {
 }
 
 pub fn rewrite_wikilinks(text: &str, wiki_repo: &Path, link_prefix: &str) -> String {
-    let resolver = match WikiLinkResolver::from_repo(wiki_repo) {
-        Ok(resolver) => resolver,
+    let renderer = match WikiLinkRenderer::from_repo(wiki_repo) {
+        Ok(renderer) => renderer,
         Err(e) => {
             tracing::warn!("failed to build page map: {e}");
             return text.to_string();
         }
     };
-    resolver.render_markdown_links(text, link_prefix)
+    renderer.render_markdown_links(text, link_prefix)
 }
 
 #[cfg(test)]
@@ -206,7 +232,6 @@ mod tests {
     #[test]
     fn handles_missing_wiki_dir_gracefully() {
         let dir = tempfile::tempdir().unwrap();
-        // No wiki/ directory created
         let input = "See [[RLHF]].";
         let result = rewrite_wikilinks(input, dir.path(), "wiki");
         assert_eq!(result, "See [[RLHF]].");
@@ -226,17 +251,17 @@ mod tests {
     }
 
     #[test]
-    fn resolver_reuses_page_map_across_answers() {
+    fn renderer_reuses_page_map_across_answers() {
         let dir = tempfile::tempdir().unwrap();
         setup_wiki(dir.path());
-        let resolver = WikiLinkResolver::from_repo(dir.path()).unwrap();
+        let renderer = WikiLinkRenderer::from_repo(dir.path()).unwrap();
 
         assert_eq!(
-            resolver.render_markdown_links("[[RLHF]]", "wiki"),
+            renderer.render_markdown_links("[[RLHF]]", "wiki"),
             "[RLHF](wiki/concepts/RLHF.md)"
         );
         assert_eq!(
-            resolver.render_markdown_links("[[DPO]]", "wiki"),
+            renderer.render_markdown_links("[[DPO]]", "wiki"),
             "[DPO](wiki/concepts/DPO.md)"
         );
     }
