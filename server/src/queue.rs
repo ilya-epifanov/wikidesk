@@ -28,11 +28,74 @@ struct Task {
     completed_at: Option<Instant>,
 }
 
+struct TaskStore {
+    tasks: Mutex<HashMap<String, Task>>,
+}
+
+impl TaskStore {
+    fn new() -> Self {
+        Self {
+            tasks: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn insert(&self, question: String) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        let (tx, _rx) = watch::channel(TaskStatus::Queued);
+        let task = Task {
+            question,
+            status: tx,
+            completed_at: None,
+        };
+        self.tasks.lock().await.insert(id.clone(), task);
+        id
+    }
+
+    async fn get_status(&self, id: &str) -> Option<TaskStatus> {
+        self.tasks
+            .lock()
+            .await
+            .get(id)
+            .map(|t| t.status.borrow().clone())
+    }
+
+    async fn subscribe(&self, id: &str) -> Option<watch::Receiver<TaskStatus>> {
+        self.tasks
+            .lock()
+            .await
+            .get(id)
+            .map(|t| t.status.subscribe())
+    }
+
+    async fn start(&self, id: &str) -> Option<String> {
+        let mut tasks = self.tasks.lock().await;
+        let task = tasks.get_mut(id)?;
+        task.status.send_replace(TaskStatus::Running);
+        Some(task.question.clone())
+    }
+
+    async fn finish(&self, id: &str, status: TaskStatus) {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(task) = tasks.get_mut(id) {
+            task.status.send_replace(status);
+            task.completed_at = Some(Instant::now());
+        }
+    }
+
+    async fn sweep_completed(&self, ttl: Duration) {
+        let now = Instant::now();
+        self.tasks.lock().await.retain(|_, task| {
+            task.completed_at
+                .is_none_or(|completed| now.duration_since(completed) < ttl)
+        });
+    }
+}
+
 pub struct AppState {
     pub config: AppConfig,
     runner: Arc<dyn Runner>,
     research_semaphore: tokio::sync::Semaphore,
-    tasks: Mutex<HashMap<String, Task>>,
+    tasks: TaskStore,
     tx: mpsc::Sender<String>,
 }
 
@@ -55,32 +118,20 @@ impl AppState {
             config,
             runner,
             research_semaphore: tokio::sync::Semaphore::new(Self::MAX_CONCURRENT_RESEARCH),
-            tasks: Mutex::new(HashMap::new()),
+            tasks: TaskStore::new(),
             tx,
         };
         (state, rx)
     }
 
     pub async fn enqueue(&self, question: String) -> Result<String, QueueFullError> {
-        let id = uuid::Uuid::new_v4().to_string();
-        let (tx, _rx) = watch::channel(TaskStatus::Queued);
-        let task = Task {
-            question,
-            status: tx,
-            completed_at: None,
-        };
-        let mut tasks = self.tasks.lock().await;
+        let id = self.tasks.insert(question).await;
         self.tx.try_send(id.clone()).map_err(|_| QueueFullError)?;
-        tasks.insert(id.clone(), task);
         Ok(id)
     }
 
     pub async fn get_task_status(&self, id: &str) -> Option<TaskStatus> {
-        self.tasks
-            .lock()
-            .await
-            .get(id)
-            .map(|t| t.status.borrow().clone())
+        self.tasks.get_status(id).await
     }
 
     pub async fn submit_and_wait(
@@ -92,10 +143,7 @@ impl AppState {
     }
 
     pub async fn wait_for_result(&self, id: &str) -> Option<TaskStatus> {
-        let mut rx = {
-            let tasks = self.tasks.lock().await;
-            tasks.get(id)?.status.subscribe()
-        };
+        let mut rx = self.tasks.subscribe(id).await?;
         loop {
             {
                 let status = rx.borrow_and_update();
@@ -111,26 +159,15 @@ impl AppState {
     }
 
     async fn start_task(&self, id: &str) -> Option<String> {
-        let mut tasks = self.tasks.lock().await;
-        let task = tasks.get_mut(id)?;
-        task.status.send_replace(TaskStatus::Running);
-        Some(task.question.clone())
+        self.tasks.start(id).await
     }
 
     async fn finish_task(&self, id: &str, status: TaskStatus) {
-        let mut tasks = self.tasks.lock().await;
-        if let Some(task) = tasks.get_mut(id) {
-            task.status.send_replace(status);
-            task.completed_at = Some(Instant::now());
-        }
+        self.tasks.finish(id, status).await;
     }
 
     async fn sweep_completed(&self, ttl: Duration) {
-        let now = Instant::now();
-        self.tasks.lock().await.retain(|_, task| {
-            task.completed_at
-                .is_none_or(|completed| now.duration_since(completed) < ttl)
-        });
+        self.tasks.sweep_completed(ttl).await;
     }
 
     async fn execute_queued_task(self: Arc<Self>, task_id: String) {
