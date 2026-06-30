@@ -8,12 +8,25 @@ use sha2::{Digest, Sha256};
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ResearchRequest {
     pub question: String,
-    pub wiki_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResearchResponse {
     pub answer: String,
+}
+
+pub fn is_valid_wiki_name(name: &str) -> bool {
+    let Some(first) = name.chars().next() else {
+        return false;
+    };
+    let Some(last) = name.chars().next_back() else {
+        return false;
+    };
+    (first.is_ascii_lowercase() || first.is_ascii_digit())
+        && (last.is_ascii_lowercase() || last.is_ascii_digit())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -287,6 +300,24 @@ mod tests {
         fs::create_dir_all(wiki.join("concepts")).unwrap();
         fs::write(wiki.join("concepts/RLHF.md"), "# RLHF").unwrap();
         fs::write(wiki.join("topics.md"), "# Topics").unwrap();
+    }
+
+    #[test]
+    fn wiki_names_are_url_and_dir_safe_slugs() {
+        for valid in ["rlhf", "rust-notes", "a1", "1a"] {
+            assert!(is_valid_wiki_name(valid), "{valid}");
+        }
+        for invalid in [
+            "",
+            "Wiki",
+            "wiki_name",
+            "-wiki",
+            "wiki-",
+            "../wiki",
+            "wiki/name",
+        ] {
+            assert!(!is_valid_wiki_name(invalid), "{invalid}");
+        }
     }
 
     #[test]

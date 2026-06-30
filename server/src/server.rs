@@ -74,7 +74,7 @@ impl ResearchServer {
         match surface.get_status(&params.task_id).await {
             Some(TaskStatus::Done { answer }) => {
                 let answer = surface
-                    .deliver(Some(TaskStatus::Done { answer }), "wiki".to_string())
+                    .deliver(Some(TaskStatus::Done { answer }))
                     .await
                     .map_err(mcp_surface_error)?;
                 Ok(serde_json::json!({ "status": "done", "answer": answer }).to_string())

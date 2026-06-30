@@ -20,28 +20,22 @@ impl ResearchSurface {
         self.state.enqueue(question).await
     }
 
-    pub async fn research_and_deliver(
-        &self,
-        question: String,
-        link_prefix: String,
-    ) -> Result<String, SurfaceError> {
+    pub async fn research_and_deliver(&self, question: String) -> Result<String, SurfaceError> {
         let status = self.state.submit_and_wait(question).await?;
-        self.deliver(status, link_prefix).await
+        self.deliver(status).await
     }
 
     pub async fn get_status(&self, task_id: &str) -> Option<TaskStatus> {
         self.state.get_task_status(task_id).await
     }
 
-    pub async fn deliver(
-        &self,
-        status: Option<TaskStatus>,
-        link_prefix: String,
-    ) -> Result<String, SurfaceError> {
-        Ok(
-            delivery::deliver_answer(status, self.state.config.wiki_repo.clone(), link_prefix)
-                .await?,
+    pub async fn deliver(&self, status: Option<TaskStatus>) -> Result<String, SurfaceError> {
+        Ok(delivery::deliver_answer(
+            status,
+            self.state.config.wiki_repo.clone(),
+            self.state.config.client_link_prefix(),
         )
+        .await?)
     }
 
     pub async fn compute_sync(&self, files: Vec<FileEntry>) -> Result<SyncResponse, SurfaceError> {

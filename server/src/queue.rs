@@ -224,8 +224,8 @@ mod tests {
 
     fn test_config() -> AppConfig {
         AppConfig {
+            name: "test".into(),
             wiki_repo: "/tmp/nonexistent".into(),
-            bind_addr: "127.0.0.1:1238".parse().unwrap(),
             runner: crate::runner::RunnerType::default(),
             agent_command: vec!["echo".into(), "$PROMPT".into()],
             prompt_template_content: String::new(),

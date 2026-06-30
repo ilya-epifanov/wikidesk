@@ -1,19 +1,19 @@
 # wikidesk
 
-A companion server for [LLM-wiki](https://github.com/karpathy/LLM-wiki) that turns any existing wiki repo into a shared knowledge service for multiple AI coding agents. wikidesk doesn't care how your wiki is organized, what agent runs the research (Claude Code, Pi, OpenCode, Codex, etc.), or what prompts you use -- it only requires a `wiki/` directory in the repo holding the actual wiki content. Set up your LLM-wiki however you like, then point wikidesk at it.
+A companion server for [LLM-wiki](https://github.com/karpathy/LLM-wiki) that turns named wiki repos into shared knowledge services for multiple AI coding agents. wikidesk doesn't care how your wiki is organized, what agent runs the research (Claude Code, Pi, OpenCode, Codex, etc.), or what prompts you use -- each configured wiki name just needs a `wiki-{name}/wiki/` directory holding the actual wiki content.
 
-The primary workflow is simple: **agents read the `wiki/` directory directly** as a local knowledge base. On top of that, wikidesk optionally provides a `research` tool that lets agents request new research -- dispatching a dedicated research agent to investigate the question, update the wiki, and return an answer. Whether your agents can trigger research or only read is up to you, controlled by your agent rules.
+The primary workflow is simple: **agents read local `wiki-{name}/` mirrors directly** as knowledge bases. On top of that, wikidesk optionally provides a `research` tool that lets agents request new research -- dispatching a dedicated research agent to investigate the question, update the server wiki repo, and return an answer. Whether your agents can trigger research or only read is up to you, controlled by your agent rules.
 
 ## How it works
 
 ![wikidesk overview architecture](docs/diagrams/overview.drawio.svg)
 
-1. Agents read the local `wiki/` directory for existing knowledge
-2. When an agent needs new research, it submits a question (via MCP `research` tool or `POST /api/research`)
-3. The server queues the question and spawns a research agent (configurable command)
-4. The research agent investigates the question, potentially creating or updating wiki pages
-5. The answer is returned with `[[wikilinks]]` resolved to file paths
-6. Agents sync their local wiki copy automatically
+1. Agents read local `wiki-{name}/` directories for existing knowledge
+2. When an agent needs new research, it submits a question to `/{name}/mcp` or `/{name}/api/research`
+3. The server queues the question for that wiki and spawns its configured research agent
+4. The research agent investigates the question, potentially creating or updating pages under `wiki-{name}/wiki/`
+5. The answer is returned with `[[wikilinks]]` resolved to `wiki-{name}/...` file paths
+6. Agents sync their local wiki copies automatically
 
 ## Agent rules
 
@@ -25,7 +25,7 @@ Configure your agents to use the wiki by adding rules to your `CLAUDE.md`, `AGEN
 ```markdown
 ## Wiki
 
-* The `wiki/` directory contains a knowledge base on <your topics>.
+* The `wiki-<name>/` directory contains a knowledge base on <your topics>.
   Consult it before making decisions in these areas.
 * Do not modify wiki files directly.
 ```
@@ -40,11 +40,11 @@ N.B.: tool names use Claude Code conventions in the snippet below.
 ```markdown
 ## Wiki
 
-* The `wiki/` directory contains a knowledge base on <your topics>.
+* The `wiki-<name>/` directory contains a knowledge base on <your topics>.
   Consult it before making decisions in these areas.
 * Do not modify wiki files directly.
-* When the wiki doesn't cover a topic you need, use the `mcp__wikidesk__research` MCP
-  tool to request investigation. Poll `mcp__wikidesk__get_result` until the task completes,
+* When the wiki doesn't cover a topic you need, use that wiki server's `research` MCP
+  tool to request investigation. Poll `get_result` until the task completes,
   then sync your local wiki copy.
 ```
 
@@ -52,7 +52,7 @@ N.B.: tool names use Claude Code conventions in the snippet below.
 
 ## Automatic wiki sync (client-server mode)
 
-In client-server mode, the local `wiki/` directory needs to stay in sync with the server. You can automate this using your agent harness's lifecycle hooks to run `wikidesk sync` at the start and end of each session.
+In client-server mode, local `wiki-{name}/` directories need to stay in sync with the server. You can automate this using your agent harness's lifecycle hooks to run `wikidesk sync` at the start and end of each session.
 
 <details>
 <summary>Claude Code -- hooks in settings.json</summary>
@@ -89,7 +89,7 @@ Add to your project's `.claude/settings.json`:
 
 Or ask Claude Code to set it up for you:
 
-> Set up hooks in `.claude/settings.json` so that `wikidesk sync` runs on `PreToolUse` (all tools) and `Stop`. The environment variables `WIKIDESK_SERVER_URL` and `WIKIDESK_WIKI_PATH` are already set in the shell.
+> Set up hooks in `.claude/settings.json` so that `wikidesk sync` runs on `PreToolUse` (all tools) and `Stop`. The environment variables `WIKIDESK_SERVER_URL` and `WIKIDESK_WIKIS` are already set in the shell.
 
 </details>
 
@@ -160,7 +160,7 @@ cargo install wikidesk-server
 
 ### 2. Set up your LLM-wiki
 
-Follow the [LLM-wiki setup instructions](https://github.com/karpathy/LLM-wiki) to create and configure your wiki repo. wikidesk only requires that the repo contains a `wiki/` subdirectory -- everything else (prompts, CLAUDE.md workflows, topic structure) is up to you.
+Follow the [LLM-wiki setup instructions](https://github.com/karpathy/LLM-wiki) to create and configure each wiki repo. Name each repo `wiki-{name}` next to `config.toml`; wikidesk requires `wiki-{name}/wiki/` to exist. Keep wikidesk prompt templates outside `wiki-{name}/wiki/` so the research agent cannot edit its own prompt.
 
 ### 3. Create a configuration file
 
@@ -168,8 +168,11 @@ See [`config.example.toml`](config.example.toml) for all options.
 
 ```toml
 # config.toml
-wiki_repo = "./my-wiki"
-prompt_template = "prompt.md"
+bind_address = "127.0.0.1:1238"
+
+[[wikis]]
+name = "rlhf" # derives ./wiki-rlhf and /rlhf
+prompt_template = "prompts/rlhf.md"
 
 # SECURITY: This command runs UNSANDBOXED by default.
 # See the Security section -- always run the server in a container.
@@ -289,8 +292,7 @@ Register-ScheduledTask `
 docker run -d \
   --name wikidesk \
   --restart unless-stopped \
-  -v /path/to/wiki-repo:/wiki \
-  -v /path/to/config.toml:/etc/wikidesk/config.toml:ro \
+  -v /path/to/wikidesk:/etc/wikidesk \
   -p 1238:1238 \
   wikidesk-server --config /etc/wikidesk/config.toml
 ```
@@ -305,7 +307,7 @@ There are two ways for agents to consume the wiki. Choose one.
 
 ### Client-server mode (recommended)
 
-Each agent machine runs `wikidesk`, which communicates with the server over HTTP. The client syncs a local wiki copy automatically after each research request.
+Each agent machine runs `wikidesk`, which communicates with the server over HTTP. The client syncs local `wiki-{name}/` copies automatically after each research request.
 
 ![Client-server deployment mode](docs/diagrams/client-server.drawio.svg)
 
@@ -342,13 +344,14 @@ cargo install wikidesk
 
 ```sh
 export WIKIDESK_SERVER_URL="http://your-server:1238"
-export WIKIDESK_WIKI_PATH="./local-wiki"
+export WIKIDESK_WIKIS="rlhf,rust-notes"
 
-# Submit a question and sync wiki
-wikidesk research "What is RLHF and how does it relate to DPO?"
+# Submit a question to one wiki and sync it
+wikidesk research -w rlhf "What is RLHF and how does it relate to DPO?"
 
-# Sync wiki only
+# Sync all configured wikis, or one with -w/--wiki
 wikidesk sync
+wikidesk sync -w rlhf
 ```
 
 ### Mount/symlink mode
@@ -364,7 +367,7 @@ Agents connect to the server directly via MCP. The wiki directory is mounted or 
 Add wikidesk to your agent's MCP configuration:
 
 ```sh
-claude mcp add wikidesk --transport http http://your-server:1238/mcp
+claude mcp add wikidesk-rlhf --transport http http://your-server:1238/rlhf/mcp
 ```
 
 Or add it manually to `.mcp.json`:
@@ -372,9 +375,9 @@ Or add it manually to `.mcp.json`:
 ```json
 {
   "mcpServers": {
-    "wikidesk": {
+    "wikidesk-rlhf": {
       "type": "streamable-http",
-      "url": "http://your-server:1238/mcp"
+      "url": "http://your-server:1238/rlhf/mcp"
     }
   }
 }
@@ -391,7 +394,7 @@ The server exposes two MCP tools:
 <summary>Linux / macOS -- symlink</summary>
 
 ```sh
-ln -s /path/to/wiki-repo/wiki ./wiki
+ln -s /path/to/wiki-rlhf/wiki ./wiki-rlhf
 ```
 
 Simplest option when the server and agent share a filesystem.
@@ -403,10 +406,10 @@ Simplest option when the server and agent share a filesystem.
 
 ```sh
 # Export on the server (add to /etc/exports):
-#   /path/to/wiki-repo/wiki  agent-host(ro,no_subtree_check)
+#   /path/to/wiki-rlhf/wiki  agent-host(ro,no_subtree_check)
 
 # Mount on the agent machine:
-sudo mount -t nfs -o ro server-host:/path/to/wiki-repo/wiki ./wiki
+sudo mount -t nfs -o ro server-host:/path/to/wiki-rlhf/wiki ./wiki-rlhf
 ```
 
 </details>
@@ -415,7 +418,7 @@ sudo mount -t nfs -o ro server-host:/path/to/wiki-repo/wiki ./wiki
 <summary>Docker</summary>
 
 ```sh
-docker run ... -v /path/to/wiki-repo/wiki:/workspace/wiki:ro ...
+docker run ... -v /path/to/wiki-rlhf/wiki:/workspace/wiki-rlhf:ro ...
 ```
 
 The `:ro` flag ensures the container cannot write to the wiki.
@@ -426,7 +429,7 @@ The `:ro` flag ensures the container cannot write to the wiki.
 <summary>Podman</summary>
 
 ```sh
-podman run ... -v /path/to/wiki-repo/wiki:/workspace/wiki:ro,Z ...
+podman run ... -v /path/to/wiki-rlhf/wiki:/workspace/wiki-rlhf:ro,Z ...
 ```
 
 The `Z` option handles SELinux relabeling.
@@ -438,7 +441,7 @@ The `Z` option handles SELinux relabeling.
 
 ```powershell
 # Requires Developer Mode or elevated prompt
-New-Item -ItemType SymbolicLink -Path .\wiki -Target C:\path\to\wiki-repo\wiki
+New-Item -ItemType SymbolicLink -Path .\wiki-rlhf -Target C:\path\to\wiki-rlhf\wiki
 ```
 
 </details>
@@ -448,7 +451,7 @@ New-Item -ItemType SymbolicLink -Path .\wiki -Target C:\path\to\wiki-repo\wiki
 
 ```sh
 # From within WSL2, the Windows filesystem is at /mnt/c/
-ln -s /mnt/c/path/to/wiki-repo/wiki ./wiki
+ln -s /mnt/c/path/to/wiki-rlhf/wiki ./wiki-rlhf
 ```
 
 </details>
@@ -457,19 +460,19 @@ ln -s /mnt/c/path/to/wiki-repo/wiki ./wiki
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `wiki_repo` | `.` | Path to the wiki git repo (must contain `wiki/` subdirectory) |
-| `bind_address` | `127.0.0.1:1238` | HTTP bind address |
-| `runner` | `generic` | Runner type: `generic`, `stream-json`, or `acp` (see below) |
-| `agent_command` | *(required)* | Command to spawn the research agent. Must contain exactly one `$PROMPT` element (except for `acp` runner). |
-| `prompt_template` | *(required)* | Path to prompt template file (must contain `{question}` placeholder) |
-| `instructions` | *(optional)* | Instructions shown to MCP clients |
-| `research_tool_description` | *(optional)* | Custom description for the `research` MCP tool |
-| `completed_task_ttl_secs` | `900` | How long to keep completed task results (seconds) |
-| `agent_timeout_secs` | `1800` | Maximum time an agent may run before being killed (seconds) |
+| `bind_address` | `127.0.0.1:1238` | Top-level HTTP bind address |
+| `[[wikis]].name` | *(required)* | Wiki slug. Derives repo `wiki-{name}`, base path `/{name}`, and client mirror `wiki-{name}`. |
+| `[[wikis]].runner` | `generic` | Runner type: `generic`, `stream-json`, or `acp` (see below) |
+| `[[wikis]].agent_command` | *(required)* | Command to spawn the research agent. Must contain exactly one `$PROMPT` element (except for `acp` runner). |
+| `[[wikis]].prompt_template` | *(required)* | Config-relative path to prompt template file (must contain `{question}` placeholder) |
+| `[[wikis]].instructions` | *(optional)* | Instructions shown to MCP clients |
+| `[[wikis]].research_tool_description` | *(optional)* | Custom description for the `research` MCP tool |
+| `[[wikis]].completed_task_ttl_secs` | `7200` | How long to keep completed task results (seconds) |
+| `[[wikis]].agent_timeout_secs` | `1800` | Maximum time an agent may run before being killed (seconds) |
 
 ### Runner types
 
-wikidesk supports three runner types for executing research agents:
+wikidesk supports three runner types for executing research agents. These keys go inside each `[[wikis]]` table:
 
 <details>
 <summary><strong>generic</strong> (default) -- simple stdout capture</summary>
@@ -509,8 +512,8 @@ agent_command = ["claude-agent-acp"]
 
 ```sh
 # Create settings file in the wiki repo
-mkdir -p <wiki_repo>/.claude
-cat > <wiki_repo>/.claude/settings.json << 'EOF'
+mkdir -p wiki-rlhf/.claude
+cat > wiki-rlhf/.claude/settings.json << 'EOF'
 {
   "permissions": {
     "defaultMode": "bypass"
@@ -528,7 +531,7 @@ The ACP runner passes the wiki repo as the working directory, so `claude-agent-a
 ## TODO
 
 - [ ] Add simple UI for monitoring research request queues
-- [ ] Manage multiple wikis, expose at different base HTTP contexts
+- [x] Manage multiple wikis, expose at different base HTTP contexts
 - [ ] Add an optional simple fixed git workflow: `git add .` → ask agent to commit in a loop until fixed point → `git push` (optional)
 - [x] Support Claude's streaming-json output mode, ACP for better progress monitoring
 

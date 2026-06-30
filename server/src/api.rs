@@ -45,7 +45,7 @@ pub async fn research(
     Json(req): Json<ResearchRequest>,
 ) -> Result<Json<ResearchResponse>, ApiError> {
     let answer = ResearchSurface::new(state)
-        .research_and_deliver(req.question, req.wiki_path)
+        .research_and_deliver(req.question)
         .await?;
     Ok(Json(ResearchResponse { answer }))
 }

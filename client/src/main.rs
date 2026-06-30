@@ -1,10 +1,11 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
 use clap::{Parser, Subcommand};
 use wikidesk_shared::{
     FileEntry, ResearchRequest, ResearchResponse, SyncPlan, SyncRequest, SyncResponse, SyncSummary,
-    snapshot_dir,
+    is_valid_wiki_name, snapshot_dir,
 };
 
 #[derive(Parser)]
@@ -18,16 +19,23 @@ struct Cli {
 enum Command {
     /// Submit a research question, sync wiki, and print the answer
     Research {
+        /// Wiki name from WIKIDESK_WIKIS
+        #[arg(short = 'w', long = "wiki")]
+        wiki: Option<String>,
         /// The question to research
         question: String,
     },
     /// Sync local wiki directory with the server
-    Sync,
+    Sync {
+        /// Wiki name from WIKIDESK_WIKIS. Omit to sync all wikis.
+        #[arg(short = 'w', long = "wiki")]
+        wiki: Option<String>,
+    },
 }
 
 struct ClientConfig {
     server_url: String,
-    wiki_path: PathBuf,
+    wikis: Vec<String>,
 }
 
 impl ClientConfig {
@@ -36,49 +44,108 @@ impl ClientConfig {
             .map_err(|_| anyhow::anyhow!("WIKIDESK_SERVER_URL not set"))?
             .trim_end_matches('/')
             .to_string();
-        let wiki_path = std::env::var("WIKIDESK_WIKI_PATH")
-            .map(PathBuf::from)
-            .map_err(|_| anyhow::anyhow!("WIKIDESK_WIKI_PATH not set"))?;
-        Ok(Self {
-            server_url,
-            wiki_path,
-        })
+        let wikis = parse_wikis(&std::env::var("WIKIDESK_WIKIS").map_err(|_| {
+            anyhow::anyhow!("WIKIDESK_WIKIS not set (example: WIKIDESK_WIKIS=rlhf,rust-notes)")
+        })?)?;
+        Ok(Self { server_url, wikis })
     }
+
+    fn require_wiki(&self, wiki: Option<String>) -> anyhow::Result<String> {
+        let Some(wiki) = wiki else {
+            anyhow::bail!(
+                "--wiki/-w is required (configured wikis: {})",
+                self.configured_wikis()
+            );
+        };
+        self.validate_wiki(wiki)
+    }
+
+    fn selected_wikis(&self, wiki: Option<String>) -> anyhow::Result<Vec<String>> {
+        match wiki {
+            Some(wiki) => Ok(vec![self.validate_wiki(wiki)?]),
+            None => Ok(self.wikis.clone()),
+        }
+    }
+
+    fn validate_wiki(&self, wiki: String) -> anyhow::Result<String> {
+        if self.wikis.contains(&wiki) {
+            Ok(wiki)
+        } else {
+            anyhow::bail!(
+                "unknown wiki '{wiki}' (configured wikis: {})",
+                self.configured_wikis()
+            );
+        }
+    }
+
+    fn configured_wikis(&self) -> String {
+        self.wikis.join(", ")
+    }
+}
+
+fn parse_wikis(raw: &str) -> anyhow::Result<Vec<String>> {
+    let mut seen = HashSet::new();
+    let mut wikis = Vec::new();
+    for wiki in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|wiki| !wiki.is_empty())
+    {
+        if !is_valid_wiki_name(wiki) {
+            anyhow::bail!(
+                "invalid wiki name '{wiki}' in WIKIDESK_WIKIS (use lowercase letters, digits, and hyphens; start and end with a letter or digit)"
+            );
+        }
+        if !seen.insert(wiki.to_string()) {
+            anyhow::bail!("duplicate wiki name '{wiki}' in WIKIDESK_WIKIS");
+        }
+        wikis.push(wiki.to_string());
+    }
+    if wikis.is_empty() {
+        anyhow::bail!("WIKIDESK_WIKIS must name at least one wiki");
+    }
+    Ok(wikis)
 }
 
 struct ClientApp<T> {
     transport: T,
-    wiki_path: PathBuf,
+    workspace: PathBuf,
 }
 
 impl<T: WikideskTransport> ClientApp<T> {
-    async fn research(&self, question: String) -> anyhow::Result<String> {
-        let result = self
-            .transport
-            .research(question, self.wiki_path.to_string_lossy().into_owned())
-            .await?;
-        self.sync().await?;
+    async fn research(&self, wiki: String, question: String) -> anyhow::Result<String> {
+        let result = self.transport.research(&wiki, question).await?;
+        self.sync_one(&wiki).await?;
         Ok(result.answer)
     }
 
-    async fn sync(&self) -> anyhow::Result<SyncSummary> {
-        let local_files = snapshot_dir(&self.wiki_path)?;
-        let sync = self.transport.sync(local_files).await?;
+    async fn sync_one(&self, wiki: &str) -> anyhow::Result<SyncSummary> {
+        let wiki_path = self.wiki_path(wiki);
+        let local_files = snapshot_dir(&wiki_path)?;
+        let sync = self.transport.sync(wiki, local_files).await?;
         let plan = SyncPlan::new(sync);
         let summary = plan.summary();
-        plan.apply(&self.wiki_path)?;
+        plan.apply(&wiki_path)?;
         Ok(summary)
+    }
+
+    async fn sync_all(&self, wikis: &[String]) -> anyhow::Result<Vec<(String, SyncSummary)>> {
+        let mut summaries = Vec::with_capacity(wikis.len());
+        for wiki in wikis {
+            summaries.push((wiki.clone(), self.sync_one(wiki).await?));
+        }
+        Ok(summaries)
+    }
+
+    fn wiki_path(&self, wiki: &str) -> PathBuf {
+        self.workspace.join(format!("wiki-{wiki}"))
     }
 }
 
 #[async_trait]
 trait WikideskTransport {
-    async fn research(
-        &self,
-        question: String,
-        wiki_path: String,
-    ) -> anyhow::Result<ResearchResponse>;
-    async fn sync(&self, files: Vec<FileEntry>) -> anyhow::Result<SyncResponse>;
+    async fn research(&self, wiki: &str, question: String) -> anyhow::Result<ResearchResponse>;
+    async fn sync(&self, wiki: &str, files: Vec<FileEntry>) -> anyhow::Result<SyncResponse>;
 }
 
 struct HttpTransport {
@@ -99,18 +166,11 @@ impl HttpTransport {
 
 #[async_trait]
 impl WikideskTransport for HttpTransport {
-    async fn research(
-        &self,
-        question: String,
-        wiki_path: String,
-    ) -> anyhow::Result<ResearchResponse> {
+    async fn research(&self, wiki: &str, question: String) -> anyhow::Result<ResearchResponse> {
         Ok(self
             .client
-            .post(format!("{}/api/research", self.server_url))
-            .json(&ResearchRequest {
-                question,
-                wiki_path,
-            })
+            .post(format!("{}/{wiki}/api/research", self.server_url))
+            .json(&ResearchRequest { question })
             .send()
             .await?
             .error_for_status()?
@@ -118,10 +178,10 @@ impl WikideskTransport for HttpTransport {
             .await?)
     }
 
-    async fn sync(&self, files: Vec<FileEntry>) -> anyhow::Result<SyncResponse> {
+    async fn sync(&self, wiki: &str, files: Vec<FileEntry>) -> anyhow::Result<SyncResponse> {
         Ok(self
             .client
-            .post(format!("{}/api/sync", self.server_url))
+            .post(format!("{}/{wiki}/api/sync", self.server_url))
             .json(&SyncRequest { files })
             .send()
             .await?
@@ -141,16 +201,22 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config = ClientConfig::from_env()?;
     let app = ClientApp {
-        transport: HttpTransport::new(config.server_url)?,
-        wiki_path: config.wiki_path,
+        transport: HttpTransport::new(config.server_url.clone())?,
+        workspace: std::env::current_dir()?,
     };
 
     match cli.command {
-        Command::Research { question } => {
-            print!("{}", app.research(question).await?);
+        Command::Research { wiki, question } => {
+            print!(
+                "{}",
+                app.research(config.require_wiki(wiki)?, question).await?
+            );
         }
-        Command::Sync => {
-            print_sync_summary(app.sync().await?);
+        Command::Sync { wiki } => {
+            let wikis = config.selected_wikis(wiki)?;
+            for (wiki, summary) in app.sync_all(&wikis).await? {
+                print_sync_summary(&wiki, summary);
+            }
         }
     }
 
@@ -165,10 +231,10 @@ fn load_dotenv(name: &str, result: dotenvy::Result<PathBuf>) {
     }
 }
 
-fn print_sync_summary(summary: SyncSummary) {
+fn print_sync_summary(wiki: &str, summary: SyncSummary) {
     if summary.total() > 0 {
         eprintln!(
-            "sync: {} updated, {} deleted",
+            "sync {wiki}: {} updated, {} deleted",
             summary.updated, summary.deleted
         );
     }
@@ -183,27 +249,23 @@ mod tests {
     #[derive(Default)]
     struct FakeTransport {
         research_calls: Arc<Mutex<Vec<(String, String)>>>,
-        sync_calls: Arc<Mutex<usize>>,
+        sync_calls: Arc<Mutex<Vec<String>>>,
         research_response: Option<ResearchResponse>,
         sync_response: Option<SyncResponse>,
     }
 
     #[async_trait]
     impl WikideskTransport for FakeTransport {
-        async fn research(
-            &self,
-            question: String,
-            wiki_path: String,
-        ) -> anyhow::Result<ResearchResponse> {
+        async fn research(&self, wiki: &str, question: String) -> anyhow::Result<ResearchResponse> {
             self.research_calls
                 .lock()
                 .unwrap()
-                .push((question, wiki_path));
+                .push((wiki.to_string(), question));
             Ok(self.research_response.clone().unwrap())
         }
 
-        async fn sync(&self, _files: Vec<FileEntry>) -> anyhow::Result<SyncResponse> {
-            *self.sync_calls.lock().unwrap() += 1;
+        async fn sync(&self, wiki: &str, _files: Vec<FileEntry>) -> anyhow::Result<SyncResponse> {
+            self.sync_calls.lock().unwrap().push(wiki.to_string());
             Ok(self.sync_response.clone().unwrap_or(SyncResponse {
                 upserts: vec![],
                 deletes: vec![],
@@ -211,10 +273,48 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parses_wiki_list() {
+        assert_eq!(
+            parse_wikis("rlhf, rust-notes").unwrap(),
+            ["rlhf", "rust-notes"]
+        );
+        assert!(parse_wikis("Wiki").is_err());
+        assert!(parse_wikis("rlhf,rlhf").is_err());
+    }
+
+    #[test]
+    fn research_requires_explicit_wiki() {
+        let config = ClientConfig {
+            server_url: "http://example.test".into(),
+            wikis: vec!["rlhf".into(), "rust".into()],
+        };
+
+        let err = config.require_wiki(None).unwrap_err().to_string();
+
+        assert!(err.contains("--wiki/-w is required"));
+        assert!(err.contains("rlhf, rust"));
+    }
+
+    #[test]
+    fn rejects_unknown_wiki() {
+        let config = ClientConfig {
+            server_url: "http://example.test".into(),
+            wikis: vec!["rlhf".into()],
+        };
+
+        let err = config
+            .require_wiki(Some("rust".into()))
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("unknown wiki 'rust'"));
+        assert!(err.contains("rlhf"));
+    }
+
     #[tokio::test]
     async fn research_submits_question_then_syncs_wiki() {
         let dir = tempfile::tempdir().unwrap();
-        let wiki = dir.path().join("wiki");
         let transport = FakeTransport {
             research_response: Some(ResearchResponse {
                 answer: "answer".into(),
@@ -232,19 +332,22 @@ mod tests {
         let sync_calls = transport.sync_calls.clone();
         let app = ClientApp {
             transport,
-            wiki_path: wiki.clone(),
+            workspace: dir.path().to_path_buf(),
         };
 
-        let answer = app.research("question?".into()).await.unwrap();
+        let answer = app
+            .research("rlhf".into(), "question?".into())
+            .await
+            .unwrap();
 
         assert_eq!(answer, "answer");
         assert_eq!(
             research_calls.lock().unwrap().as_slice(),
-            &[("question?".into(), wiki.to_string_lossy().into_owned())]
+            &[("rlhf".into(), "question?".into())]
         );
-        assert_eq!(*sync_calls.lock().unwrap(), 1);
+        assert_eq!(sync_calls.lock().unwrap().as_slice(), &["rlhf"]);
         assert_eq!(
-            std::fs::read_to_string(wiki.join("notes.md")).unwrap(),
+            std::fs::read_to_string(dir.path().join("wiki-rlhf/notes.md")).unwrap(),
             "# Notes"
         );
     }
@@ -252,7 +355,7 @@ mod tests {
     #[tokio::test]
     async fn sync_returns_summary_and_applies_changes() {
         let dir = tempfile::tempdir().unwrap();
-        let wiki = dir.path().join("wiki");
+        let wiki = dir.path().join("wiki-rlhf");
         std::fs::create_dir_all(&wiki).unwrap();
         std::fs::write(wiki.join("old.md"), "old").unwrap();
         let transport = FakeTransport {
@@ -267,10 +370,10 @@ mod tests {
         };
         let app = ClientApp {
             transport,
-            wiki_path: wiki.clone(),
+            workspace: dir.path().to_path_buf(),
         };
 
-        let summary = app.sync().await.unwrap();
+        let summary = app.sync_one("rlhf").await.unwrap();
 
         assert_eq!(
             summary,
@@ -281,6 +384,22 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(wiki.join("new.md")).unwrap(), "new");
         assert!(!wiki.join("old.md").exists());
+    }
+
+    #[tokio::test]
+    async fn sync_all_syncs_every_configured_wiki() {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = FakeTransport::default();
+        let sync_calls = transport.sync_calls.clone();
+        let app = ClientApp {
+            transport,
+            workspace: dir.path().to_path_buf(),
+        };
+
+        let summaries = app.sync_all(&["rlhf".into(), "rust".into()]).await.unwrap();
+
+        assert_eq!(sync_calls.lock().unwrap().as_slice(), &["rlhf", "rust"]);
+        assert_eq!(summaries.len(), 2);
     }
 
     #[test]

@@ -28,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let cfg = config::AppConfig::load(&cli.config)?;
+    let cfg = config::ServerConfig::load(&cli.config)?;
 
     runtime::run(cfg).await
 }

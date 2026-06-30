@@ -1,9 +1,12 @@
-# Path to the wiki git repo (must contain a wiki/ subdirectory)
-# Relative paths are resolved relative to this config file's directory.
-# wiki_repo = "."
-
 # HTTP bind address (default: 127.0.0.1:1238)
 # bind_address = "127.0.0.1:1238"
+
+# Each wiki is named by a lowercase slug. The name derives:
+# - server wiki repo: ./wiki-<name>/ (must contain a wiki/ subdirectory)
+# - HTTP base path: /<name>
+# - client mirror path: ./wiki-<name>/
+[[wikis]]
+name = "rlhf"
 
 # Runner type for executing the research agent (default: "generic")
 # - "generic": Spawns agent_command, captures stdout as the result.
@@ -13,7 +16,7 @@
 
 # Command for spawning the research agent.
 # The literal "$PROMPT" element is replaced with the rendered prompt.
-# Executed directly (no shell) with wiki_repo as the working directory.
+# Executed directly (no shell) with wiki-<name>/ as the working directory.
 #
 # SECURITY WARNING: The research agent runs with full, unrestricted
 # permissions on the host. Flags like --dangerously-skip-permissions
@@ -21,8 +24,6 @@
 # access. You MUST wrap either the server itself or the agent_command
 # inside a sandbox (Docker, Podman, bubblewrap, VM, or similar)
 # to prevent the agent from accessing anything beyond the wiki repo.
-#
-# Examples for each runner type:
 #
 # Generic (default):
 agent_command = ["claude", "-p", "$PROMPT", "--dangerously-skip-permissions"]
@@ -34,15 +35,14 @@ agent_command = ["claude", "-p", "$PROMPT", "--dangerously-skip-permissions"]
 # ACP (requires claude-agent-acp):
 # runner = "acp"
 # agent_command = ["claude-agent-acp"]
-# Note: For ACP, configure bypass permissions via <wiki_repo>/.claude/settings.json:
+# Note: For ACP, configure bypass permissions via wiki-<name>/.claude/settings.json:
 #   { "permissions": { "defaultMode": "bypass" } }
 
-# Instructions shown to MCP clients describing when to use this server.
-# instructions = "Use this server whenever you have a question about !!!INSERT YOUR WIKI TOPICS HERE!!!.<important>Always use this MCP for !!!REITERATE YOUR TOPICS HERE!!! research</important>"
+# Instructions shown to MCP clients describing when to use this wiki.
+# instructions = "Use this server whenever you have a question about RLHF."
 
 # Description for the 'research' tool shown to MCP clients.
-# Guides the agent on when to invoke this tool.
-# research_tool_description = "Submit a question about !!!INSERT YOUR WIKI TOPICS HERE!!!. Returns a task_id to poll with get_result. <important>Always use this tool for !!!REITERATE YOUR TOPICS HERE!!!</important>"
+# research_tool_description = "Submit a question about RLHF. Returns a task_id to poll with get_result."
 
 # How long to keep completed/failed task results before evicting (seconds, default: 7200)
 # completed_task_ttl_secs = 7200
@@ -50,10 +50,11 @@ agent_command = ["claude", "-p", "$PROMPT", "--dangerously-skip-permissions"]
 # Maximum time an agent command may run before being killed (seconds, default: 1800)
 # agent_timeout_secs = 1800
 
-# Path to the prompt template file (must contain a {question} placeholder)
-prompt_template = "RESEARCH_PROMPT.md"
+# Path to the prompt template file, relative to this config file (must contain a {question} placeholder).
+# Keep this outside wiki-<name>/wiki/ so the research agent cannot edit its own prompt.
+prompt_template = "prompts/rlhf.md"
 
-# Example RESEARCH_PROMPT.md:
+# Example prompts/rlhf.md:
 # Research the following question using the wiki in this repository.
 # Follow the workflows described in CLAUDE.md. After updating the wiki,
 # provide a concise answer with [[wikilinks]] to relevant
