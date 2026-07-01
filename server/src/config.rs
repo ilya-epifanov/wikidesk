@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
-use wikidesk_shared::is_valid_wiki_name;
+use wikidesk_shared::{WikiInfo, is_valid_wiki_name};
 
 use crate::runner::{self, Runner, RunnerType};
 
@@ -22,16 +22,24 @@ struct RawServerConfig {
 #[serde(deny_unknown_fields)]
 struct RawWikiConfig {
     name: String,
+    description: String,
     #[serde(default)]
     runner: RunnerType,
     agent_command: Vec<String>,
     prompt_template: PathBuf,
-    instructions: Option<String>,
-    research_tool_description: Option<String>,
+    #[serde(default)]
+    mcp: RawMcpConfig,
     #[serde(default = "default_completed_task_ttl_secs")]
     completed_task_ttl_secs: u64,
     #[serde(default = "default_agent_timeout_secs")]
     agent_timeout_secs: u64,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMcpConfig {
+    instructions: Option<String>,
+    research_tool_description: Option<String>,
 }
 
 fn default_bind_address() -> String {
@@ -59,11 +67,12 @@ pub struct ServerConfig {
 pub struct AppConfig {
     pub name: String,
     pub wiki_repo: PathBuf,
+    pub description: String,
     pub runner: RunnerType,
     pub agent_command: Vec<String>,
     pub prompt_template_content: String,
-    pub instructions: Option<String>,
-    pub research_tool_description: Option<String>,
+    pub mcp_instructions: String,
+    pub research_tool_description: String,
     pub completed_task_ttl: Duration,
     pub agent_timeout: Duration,
 }
@@ -83,6 +92,8 @@ pub enum ConfigError {
     InvalidWikiName(String),
     #[error("duplicate wiki name '{0}'")]
     DuplicateWikiName(String),
+    #[error("description for wiki '{0}' must not be empty")]
+    WikiDescriptionEmpty(String),
     #[error("wiki repo for '{name}' does not exist at '{}'", path.display())]
     WikiRepoMissing { name: String, path: PathBuf },
     #[error("wiki repo for '{name}' has no wiki/ subdirectory at '{}'", path.display())]
@@ -121,6 +132,25 @@ fn validate_wiki_name(name: &str) -> Result<(), ConfigError> {
     } else {
         Err(ConfigError::InvalidWikiName(name.to_string()))
     }
+}
+
+fn validate_description(name: &str, description: &str) -> Result<String, ConfigError> {
+    let description = description.trim();
+    if description.is_empty() {
+        Err(ConfigError::WikiDescriptionEmpty(name.to_string()))
+    } else {
+        Ok(description.to_string())
+    }
+}
+
+fn default_mcp_instructions(description: &str) -> String {
+    format!(
+        "Use this wiki for: {description}\n\nUse research when the existing wiki may not cover the full picture, including adjacent knowledge that may not have been researched yet."
+    )
+}
+
+fn default_research_tool_description(description: &str) -> String {
+    format!("Submit a research question for this wiki. Covers: {description}")
 }
 
 fn validate_agent_command(
@@ -187,14 +217,19 @@ impl AppConfig {
         runner::create_runner(self.runner)
     }
 
-    pub fn mcp_instructions(&self) -> &str {
-        self.instructions.as_deref().unwrap_or(
-            "Research server: use 'research' to submit questions, 'get_result' to poll results.",
-        )
+    pub fn info(&self) -> WikiInfo {
+        WikiInfo {
+            name: self.name.clone(),
+            description: self.description.clone(),
+        }
     }
 
-    pub fn research_tool_description(&self) -> Option<&str> {
-        self.research_tool_description.as_deref()
+    pub fn mcp_instructions(&self) -> &str {
+        &self.mcp_instructions
+    }
+
+    pub fn research_tool_description(&self) -> &str {
+        &self.research_tool_description
     }
 }
 
@@ -235,6 +270,7 @@ impl ServerConfig {
             if !seen.insert(raw_wiki.name.clone()) {
                 return Err(ConfigError::DuplicateWikiName(raw_wiki.name));
             }
+            let description = validate_description(&raw_wiki.name, &raw_wiki.description)?;
             validate_agent_command(&raw_wiki.name, raw_wiki.runner, &raw_wiki.agent_command)?;
 
             let wiki_repo = wiki_repo_path(&config_dir, &raw_wiki.name);
@@ -253,14 +289,24 @@ impl ServerConfig {
             let prompt_template_content =
                 load_prompt_template(&resolve(&config_dir, raw_wiki.prompt_template))?;
 
+            let mcp_instructions = raw_wiki
+                .mcp
+                .instructions
+                .unwrap_or_else(|| default_mcp_instructions(&description));
+            let research_tool_description = raw_wiki
+                .mcp
+                .research_tool_description
+                .unwrap_or_else(|| default_research_tool_description(&description));
+
             wikis.push(AppConfig {
                 name: raw_wiki.name,
                 wiki_repo,
+                description,
                 runner: raw_wiki.runner,
                 agent_command: raw_wiki.agent_command,
                 prompt_template_content,
-                instructions: raw_wiki.instructions,
-                research_tool_description: raw_wiki.research_tool_description,
+                mcp_instructions,
+                research_tool_description,
                 completed_task_ttl: Duration::from_secs(raw_wiki.completed_task_ttl_secs),
                 agent_timeout: Duration::from_secs(raw_wiki.agent_timeout_secs),
             });
@@ -278,6 +324,7 @@ mod tests {
     const BASE_CONFIG: &str = r#"
 [[wikis]]
 name = "rlhf"
+description = "Test wiki."
 agent_command = ["echo", "$PROMPT"]
 prompt_template = "prompt.md"
 "#;
@@ -328,6 +375,16 @@ prompt_template = "prompt.md"
         assert_eq!(wiki.wiki_dir(), wiki.wiki_repo.join("wiki"));
         assert_eq!(wiki.base_path(), "/rlhf");
         assert_eq!(wiki.client_link_prefix(), "wiki-rlhf");
+        assert_eq!(wiki.description, "Test wiki.");
+        assert_eq!(
+            wiki.mcp_instructions,
+            "Use this wiki for: Test wiki.\n\nUse research when the existing wiki may not cover the full picture, including adjacent knowledge that may not have been researched yet."
+        );
+        assert_eq!(
+            wiki.research_tool_description,
+            "Submit a research question for this wiki. Covers: Test wiki."
+        );
+        assert_eq!(wiki.info().description, "Test wiki.");
         assert_eq!(wiki.prompt_template_content, "Research: {question}");
     }
 
@@ -342,11 +399,13 @@ prompt_template = "prompt.md"
             r#"
 [[wikis]]
 name = "rlhf"
+description = "Test wiki."
 agent_command = ["echo", "$PROMPT"]
 prompt_template = "prompt.md"
 
 [[wikis]]
 name = "rust-notes"
+description = "Test wiki."
 agent_command = ["echo", "$PROMPT"]
 prompt_template = "prompt.md"
 "#,
@@ -373,6 +432,52 @@ prompt_template = "prompt.md"
     }
 
     #[test]
+    fn loads_mcp_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_wiki(dir.path(), "rlhf");
+        fs::write(dir.path().join("prompt.md"), "Research: {question}").unwrap();
+        let config_path = write_config(
+            dir.path(),
+            r#"
+[[wikis]]
+name = "rlhf"
+description = "Test wiki."
+agent_command = ["echo", "$PROMPT"]
+prompt_template = "prompt.md"
+
+[wikis.mcp]
+instructions = "custom instructions"
+research_tool_description = "custom tool"
+"#,
+        );
+
+        let cfg = load_one(&config_path);
+
+        assert_eq!(cfg.mcp_instructions, "custom instructions");
+        assert_eq!(cfg.research_tool_description, "custom tool");
+    }
+
+    #[test]
+    fn rejects_empty_description() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_wiki(dir.path(), "rlhf");
+        fs::write(dir.path().join("prompt.md"), "Research: {question}").unwrap();
+        let config_path = write_config(
+            dir.path(),
+            r#"
+[[wikis]]
+name = "rlhf"
+description = " "
+agent_command = ["echo", "$PROMPT"]
+prompt_template = "prompt.md"
+"#,
+        );
+
+        let err = ServerConfig::load(&config_path).unwrap_err();
+        assert!(matches!(err, ConfigError::WikiDescriptionEmpty(name) if name == "rlhf"));
+    }
+
+    #[test]
     fn rejects_invalid_wiki_name() {
         let dir = tempfile::tempdir().unwrap();
         setup_wiki(dir.path(), "Wiki");
@@ -382,6 +487,7 @@ prompt_template = "prompt.md"
             r#"
 [[wikis]]
 name = "Wiki"
+description = "Test wiki."
 agent_command = ["echo", "$PROMPT"]
 prompt_template = "prompt.md"
 "#,
@@ -400,11 +506,13 @@ prompt_template = "prompt.md"
             r#"
 [[wikis]]
 name = "rlhf"
+description = "Test wiki."
 agent_command = ["echo", "$PROMPT"]
 prompt_template = "prompt.md"
 
 [[wikis]]
 name = "rlhf"
+description = "Test wiki."
 agent_command = ["echo", "$PROMPT"]
 prompt_template = "prompt.md"
 "#,
@@ -485,6 +593,7 @@ prompt_template = "prompt.md"
             r#"
 [[wikis]]
 name = "rlhf"
+description = "Test wiki."
 agent_command = []
 prompt_template = "prompt.md"
 "#,
@@ -504,6 +613,7 @@ prompt_template = "prompt.md"
             r#"
 [[wikis]]
 name = "rlhf"
+description = "Test wiki."
 agent_command = ["echo", "hello"]
 prompt_template = "prompt.md"
 "#,
@@ -523,6 +633,7 @@ prompt_template = "prompt.md"
             r#"
 [[wikis]]
 name = "rlhf"
+description = "Test wiki."
 runner = "acp"
 agent_command = ["claude-agent-acp"]
 prompt_template = "prompt.md"
@@ -543,6 +654,7 @@ prompt_template = "prompt.md"
             r#"
 [[wikis]]
 name = "rlhf"
+description = "Test wiki."
 runner = "acp"
 agent_command = ["claude-agent-acp", "$PROMPT"]
 prompt_template = "prompt.md"

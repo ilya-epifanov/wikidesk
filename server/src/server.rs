@@ -38,10 +38,9 @@ pub struct ResearchServer {
 impl ResearchServer {
     pub fn new(state: Arc<AppState>) -> Self {
         let mut tool_router = Self::tool_router();
-        if let Some(desc) = state.config.research_tool_description()
-            && let Some(route) = tool_router.map.get_mut("research")
-        {
+        if let Some(route) = tool_router.map.get_mut("research") {
             let base = route.attr.description.as_deref().unwrap_or_default();
+            let desc = state.config.research_tool_description();
             route.attr.description = Some(Cow::Owned(format!("{base}\n\n{desc}")));
         }
         Self { state, tool_router }

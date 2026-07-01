@@ -172,6 +172,7 @@ bind_address = "127.0.0.1:1238"
 
 [[wikis]]
 name = "rlhf" # derives ./wiki-rlhf and /rlhf
+description = "RLHF, preference optimization, DPO/PPO/GRPO/RLOO, reward modeling, and alignment training methods."
 prompt_template = "prompts/rlhf.md"
 
 # SECURITY: This command runs UNSANDBOXED by default.
@@ -343,6 +344,9 @@ cargo install wikidesk
 #### Configure and use
 
 ```sh
+# Print a prompt for your coding agent to configure this repo's AGENTS.md/CLAUDE.md.
+wikidesk agent setup http://your-server:1238 rlhf rust-notes
+
 export WIKIDESK_SERVER_URL="http://your-server:1238"
 export WIKIDESK_WIKIS="rlhf,rust-notes"
 
@@ -462,11 +466,12 @@ ln -s /mnt/c/path/to/wiki-rlhf/wiki ./wiki-rlhf
 |-----|---------|-------------|
 | `bind_address` | `127.0.0.1:1238` | Top-level HTTP bind address |
 | `[[wikis]].name` | *(required)* | Wiki slug. Derives repo `wiki-{name}`, base path `/{name}`, and client mirror `wiki-{name}`. |
+| `[[wikis]].description` | *(required)* | What this wiki covers. Used by MCP descriptions and `wikidesk agent setup`. |
 | `[[wikis]].runner` | `generic` | Runner type: `generic`, `stream-json`, or `acp` (see below) |
 | `[[wikis]].agent_command` | *(required)* | Command to spawn the research agent. Must contain exactly one `$PROMPT` element (except for `acp` runner). |
 | `[[wikis]].prompt_template` | *(required)* | Config-relative path to prompt template file (must contain `{question}` placeholder) |
-| `[[wikis]].instructions` | *(optional)* | Instructions shown to MCP clients |
-| `[[wikis]].research_tool_description` | *(optional)* | Custom description for the `research` MCP tool |
+| `[wikis.mcp].instructions` | derived from `description` | Instructions shown to MCP clients |
+| `[wikis.mcp].research_tool_description` | derived from `description` | Custom description for the `research` MCP tool |
 | `[[wikis]].completed_task_ttl_secs` | `7200` | How long to keep completed task results (seconds) |
 | `[[wikis]].agent_timeout_secs` | `1800` | Maximum time an agent may run before being killed (seconds) |
 

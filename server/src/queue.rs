@@ -226,11 +226,12 @@ mod tests {
         AppConfig {
             name: "test".into(),
             wiki_repo: "/tmp/nonexistent".into(),
+            description: "Test wiki.".into(),
             runner: crate::runner::RunnerType::default(),
             agent_command: vec!["echo".into(), "$PROMPT".into()],
             prompt_template_content: String::new(),
-            instructions: None,
-            research_tool_description: None,
+            mcp_instructions: "Test instructions.".into(),
+            research_tool_description: "Test research tool.".into(),
             completed_task_ttl: std::time::Duration::from_secs(900),
             agent_timeout: std::time::Duration::from_secs(1800),
         }

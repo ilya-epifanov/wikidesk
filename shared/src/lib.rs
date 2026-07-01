@@ -15,6 +15,20 @@ pub struct ResearchResponse {
     pub answer: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListWikisResponse {
+    pub wikis: Vec<WikiInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WikiInfo {
+    pub name: String,
+    pub description: String,
+}
+
+const LOCAL_MIRROR_GITIGNORE_PATH: &str = ".gitignore";
+const LOCAL_MIRROR_GITIGNORE_CONTENT: &str = "*\n";
+
 pub fn is_valid_wiki_name(name: &str) -> bool {
     let Some(first) = name.chars().next() else {
         return false;
@@ -72,9 +86,27 @@ impl SyncPlan {
     }
 
     pub fn summary(&self) -> SyncSummary {
+        let upserted: HashSet<&str> = self
+            .response
+            .upserts
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect();
         SyncSummary {
-            updated: self.response.upserts.len(),
-            deleted: self.response.deletes.len(),
+            updated: self
+                .response
+                .upserts
+                .iter()
+                .filter(|f| !is_local_mirror_control_path(&f.path))
+                .count(),
+            deleted: self
+                .response
+                .deletes
+                .iter()
+                .filter(|p| {
+                    !upserted.contains(p.as_str()) && !is_local_mirror_control_path(p.as_str())
+                })
+                .count(),
         }
     }
 
@@ -161,6 +193,13 @@ pub fn snapshot_dir(dir: &Path) -> Result<Vec<FileEntry>, WikiSyncError> {
         .collect()
 }
 
+pub fn snapshot_local_mirror(dir: &Path) -> Result<Vec<FileEntry>, WikiSyncError> {
+    Ok(snapshot_dir(dir)?
+        .into_iter()
+        .filter(|file| !is_local_mirror_control_path(&file.path))
+        .collect())
+}
+
 fn visit(base: &Path, dir: &Path, files: &mut Vec<WikiFile>) -> Result<(), WikiSyncError> {
     let entries = std::fs::read_dir(dir)
         .map_err(|source| WikiSyncError::io(dir.display().to_string(), source))?;
@@ -238,6 +277,9 @@ fn apply_sync_plan(wiki_path: &Path, plan: &SyncPlan) -> Result<(), WikiSyncErro
         .canonicalize()
         .map_err(|source| WikiSyncError::io(wiki_path.display().to_string(), source))?;
     for file in &sync.upserts {
+        if is_local_mirror_control_path(&file.path) {
+            continue;
+        }
         let target = resolve_and_validate(&wiki_canonical, &file.path)?;
         std::fs::write(&target, &file.content)
             .map_err(|source| WikiSyncError::io(target.display().to_string(), source))?;
@@ -245,7 +287,7 @@ fn apply_sync_plan(wiki_path: &Path, plan: &SyncPlan) -> Result<(), WikiSyncErro
 
     let upserted: HashSet<&str> = sync.upserts.iter().map(|f| f.path.as_str()).collect();
     for path in &sync.deletes {
-        if upserted.contains(path.as_str()) {
+        if upserted.contains(path.as_str()) || is_local_mirror_control_path(path) {
             continue;
         }
         validate_relative_path(path)?;
@@ -262,7 +304,18 @@ fn apply_sync_plan(wiki_path: &Path, plan: &SyncPlan) -> Result<(), WikiSyncErro
             .map_err(|source| WikiSyncError::io(target.display().to_string(), source))?;
     }
 
+    write_local_mirror_gitignore(&wiki_canonical)?;
     Ok(())
+}
+
+fn is_local_mirror_control_path(path: &str) -> bool {
+    path == LOCAL_MIRROR_GITIGNORE_PATH
+}
+
+fn write_local_mirror_gitignore(wiki_path: &Path) -> Result<(), WikiSyncError> {
+    let target = wiki_path.join(LOCAL_MIRROR_GITIGNORE_PATH);
+    std::fs::write(&target, LOCAL_MIRROR_GITIGNORE_CONTENT)
+        .map_err(|source| WikiSyncError::io(target.display().to_string(), source))
 }
 
 fn validate_relative_path(relative: &str) -> Result<(), WikiSyncError> {
@@ -335,6 +388,23 @@ mod tests {
             .collect();
 
         assert_eq!(paths, vec!["concepts/RLHF.md"]);
+    }
+
+    #[test]
+    fn snapshot_local_mirror_ignores_control_gitignore() {
+        let dir = tempfile::tempdir().unwrap();
+        let wiki = dir.path().join("wiki");
+        fs::create_dir_all(&wiki).unwrap();
+        fs::write(wiki.join(".gitignore"), "*\n").unwrap();
+        fs::write(wiki.join("notes.md"), "notes").unwrap();
+
+        let paths: Vec<_> = snapshot_local_mirror(&wiki)
+            .unwrap()
+            .into_iter()
+            .map(|file| file.path)
+            .collect();
+
+        assert_eq!(paths, vec!["notes.md"]);
     }
 
     #[test]
@@ -411,6 +481,34 @@ mod tests {
             "# RLHF"
         );
         assert!(!wiki.join("old.md").exists());
+        assert_eq!(fs::read_to_string(wiki.join(".gitignore")).unwrap(), "*\n");
+    }
+
+    #[test]
+    fn apply_sync_owns_local_gitignore() {
+        let dir = tempfile::tempdir().unwrap();
+        let wiki = dir.path().join("wiki");
+        fs::create_dir_all(&wiki).unwrap();
+        fs::write(wiki.join(".gitignore"), "custom\n").unwrap();
+
+        let plan = SyncPlan::new(SyncResponse {
+            upserts: vec![FileContent {
+                path: ".gitignore".into(),
+                content: "server\n".into(),
+            }],
+            deletes: vec![".gitignore".into()],
+        });
+
+        assert_eq!(
+            plan.summary(),
+            SyncSummary {
+                updated: 0,
+                deleted: 0,
+            }
+        );
+        plan.apply(&wiki).unwrap();
+
+        assert_eq!(fs::read_to_string(wiki.join(".gitignore")).unwrap(), "*\n");
     }
 
     #[test]

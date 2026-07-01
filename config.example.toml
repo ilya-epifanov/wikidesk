@@ -7,6 +7,7 @@
 # - client mirror path: ./wiki-<name>/
 [[wikis]]
 name = "rlhf"
+description = "RLHF, preference optimization, DPO/PPO/GRPO/RLOO, reward modeling, and alignment training methods."
 
 # Runner type for executing the research agent (default: "generic")
 # - "generic": Spawns agent_command, captures stdout as the result.
@@ -38,12 +39,6 @@ agent_command = ["claude", "-p", "$PROMPT", "--dangerously-skip-permissions"]
 # Note: For ACP, configure bypass permissions via wiki-<name>/.claude/settings.json:
 #   { "permissions": { "defaultMode": "bypass" } }
 
-# Instructions shown to MCP clients describing when to use this wiki.
-# instructions = "Use this server whenever you have a question about RLHF."
-
-# Description for the 'research' tool shown to MCP clients.
-# research_tool_description = "Submit a question about RLHF. Returns a task_id to poll with get_result."
-
 # How long to keep completed/failed task results before evicting (seconds, default: 7200)
 # completed_task_ttl_secs = 7200
 
@@ -53,6 +48,12 @@ agent_command = ["claude", "-p", "$PROMPT", "--dangerously-skip-permissions"]
 # Path to the prompt template file, relative to this config file (must contain a {question} placeholder).
 # Keep this outside wiki-<name>/wiki/ so the research agent cannot edit its own prompt.
 prompt_template = "prompts/rlhf.md"
+
+# Optional MCP overrides. If omitted, these are derived from description.
+# Keep this after all top-level wiki fields; TOML subtables apply to the current [[wikis]] item.
+# [wikis.mcp]
+# instructions = "Use this wiki for RLHF and preference-optimization research."
+# research_tool_description = "Submit a research question about RLHF. Returns a task_id to poll with get_result."
 
 # Example prompts/rlhf.md:
 # Research the following question using the wiki in this repository.
