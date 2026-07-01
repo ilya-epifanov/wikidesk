@@ -27,6 +27,8 @@ pub struct ResearchParams {
 pub struct GetResultParams {
     /// The task ID returned by the research tool
     pub task_id: String,
+    /// Optional local mirror path used when rendering wikilinks
+    pub local_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -73,7 +75,7 @@ impl ResearchServer {
         match surface.get_status(&params.task_id).await {
             Some(TaskStatus::Done { answer }) => {
                 let answer = surface
-                    .deliver(Some(TaskStatus::Done { answer }))
+                    .deliver(Some(TaskStatus::Done { answer }), params.local_path)
                     .await
                     .map_err(mcp_surface_error)?;
                 Ok(serde_json::json!({ "status": "done", "answer": answer }).to_string())
@@ -91,7 +93,12 @@ impl ResearchServer {
 }
 
 fn mcp_surface_error(err: SurfaceError) -> ErrorData {
-    ErrorData::internal_error(err.to_string(), None)
+    match err {
+        SurfaceError::InvalidLocalPath(error) => {
+            ErrorData::invalid_params(format!("invalid local_path: {error}"), None)
+        }
+        other => ErrorData::internal_error(other.to_string(), None),
+    }
 }
 
 fn mcp_delivery_error(err: DeliveryError) -> ErrorData {

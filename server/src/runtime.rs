@@ -4,7 +4,7 @@ use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
 use tokio_util::sync::CancellationToken;
-use wikidesk_shared::ListWikisResponse;
+use wikidesk_shared::{ListWikisResponse, WIKI_LIST_PATH};
 
 use crate::{api, config::ServerConfig, queue, server};
 
@@ -20,7 +20,7 @@ pub async fn run(cfg: ServerConfig) -> anyhow::Result<()> {
     let wiki_infos = Arc::new(cfg.wikis.iter().map(|wiki| wiki.info()).collect::<Vec<_>>());
     let mut background = tokio::task::JoinSet::new();
     let mut router = axum::Router::new().route(
-        "/api/wikis",
+        WIKI_LIST_PATH,
         axum::routing::get({
             let wiki_infos = wiki_infos.clone();
             move || {

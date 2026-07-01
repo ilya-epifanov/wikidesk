@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
-use wikidesk_shared::{WikiInfo, is_valid_wiki_name};
+use wikidesk_shared::{WikiInfo, derived_wiki_path, is_valid_wiki_name, wiki_base_path};
 
 use crate::runner::{self, Runner, RunnerType};
 
@@ -123,7 +123,7 @@ fn resolve(base: &Path, path: PathBuf) -> PathBuf {
 }
 
 fn wiki_repo_path(config_dir: &Path, name: &str) -> PathBuf {
-    config_dir.join(format!("wiki-{name}"))
+    config_dir.join(derived_wiki_path(name))
 }
 
 fn validate_wiki_name(name: &str) -> Result<(), ConfigError> {
@@ -201,11 +201,11 @@ impl AppConfig {
     }
 
     pub fn base_path(&self) -> String {
-        format!("/{}", self.name)
+        wiki_base_path(&self.name)
     }
 
-    pub fn client_link_prefix(&self) -> String {
-        format!("wiki-{}", self.name)
+    pub fn derived_wiki_path(&self) -> String {
+        derived_wiki_path(&self.name)
     }
 
     pub fn build_research_prompt(&self, question: &str) -> String {
@@ -330,7 +330,7 @@ prompt_template = "prompt.md"
 "#;
 
     fn setup_wiki(dir: &Path, name: &str) {
-        fs::create_dir_all(dir.join(format!("wiki-{name}/wiki"))).unwrap();
+        fs::create_dir_all(dir.join(derived_wiki_path(name)).join("wiki")).unwrap();
     }
 
     fn setup_dir(dir: &Path) {
@@ -373,8 +373,8 @@ prompt_template = "prompt.md"
             dir.path().canonicalize().unwrap().join("wiki-rlhf")
         );
         assert_eq!(wiki.wiki_dir(), wiki.wiki_repo.join("wiki"));
-        assert_eq!(wiki.base_path(), "/rlhf");
-        assert_eq!(wiki.client_link_prefix(), "wiki-rlhf");
+        assert_eq!(wiki.base_path(), "/wiki/rlhf");
+        assert_eq!(wiki.derived_wiki_path(), "wiki-rlhf");
         assert_eq!(wiki.description, "Test wiki.");
         assert_eq!(
             wiki.mcp_instructions,
@@ -386,6 +386,32 @@ prompt_template = "prompt.md"
         );
         assert_eq!(wiki.info().description, "Test wiki.");
         assert_eq!(wiki.prompt_template_content, "Research: {question}");
+    }
+
+    #[test]
+    fn default_wiki_uses_plain_wiki_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_wiki(dir.path(), "default");
+        fs::write(dir.path().join("prompt.md"), "Research: {question}").unwrap();
+        let config_path = write_config(
+            dir.path(),
+            r#"
+[[wikis]]
+name = "default"
+description = "Test wiki."
+agent_command = ["echo", "$PROMPT"]
+prompt_template = "prompt.md"
+"#,
+        );
+
+        let wiki = load_one(&config_path);
+
+        assert_eq!(
+            wiki.wiki_repo,
+            dir.path().canonicalize().unwrap().join("wiki")
+        );
+        assert_eq!(wiki.base_path(), "/wiki/default");
+        assert_eq!(wiki.derived_wiki_path(), "wiki");
     }
 
     #[test]

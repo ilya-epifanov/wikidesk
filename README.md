@@ -1,18 +1,18 @@
 # wikidesk
 
-A companion server for [LLM-wiki](https://github.com/karpathy/LLM-wiki) that turns named wiki repos into shared knowledge services for multiple AI coding agents. wikidesk doesn't care how your wiki is organized, what agent runs the research (Claude Code, Pi, OpenCode, Codex, etc.), or what prompts you use -- each configured wiki name just needs a `wiki-{name}/wiki/` directory holding the actual wiki content.
+A companion server for [LLM-wiki](https://github.com/karpathy/LLM-wiki) that turns named wiki repos into shared knowledge services for multiple AI coding agents. wikidesk doesn't care how your wiki is organized, what agent runs the research (Claude Code, Pi, OpenCode, Codex, etc.), or what prompts you use -- each configured wiki name just needs a derived repo directory holding the actual wiki content (`wiki-{name}/wiki/`, except `default` uses `wiki/wiki/`).
 
-The primary workflow is simple: **agents read local `wiki-{name}/` mirrors directly** as knowledge bases. On top of that, wikidesk optionally provides a `research` tool that lets agents request new research -- dispatching a dedicated research agent to investigate the question, update the server wiki repo, and return an answer. Whether your agents can trigger research or only read is up to you, controlled by your agent rules.
+The primary workflow is simple: **agents read local wiki mirrors directly** as knowledge bases. Mirrors default to `wiki-{name}/`, except `default` uses `wiki/`, and clients can override them. On top of that, wikidesk optionally provides a `research` tool that lets agents request new research -- dispatching a dedicated research agent to investigate the question, update the server wiki repo, and return an answer. Whether your agents can trigger research or only read is up to you, controlled by your agent rules.
 
 ## How it works
 
 ![wikidesk overview architecture](docs/diagrams/overview.drawio.svg)
 
-1. Agents read local `wiki-{name}/` directories for existing knowledge
-2. When an agent needs new research, it submits a question to `/{name}/mcp` or `/{name}/api/research`
+1. Agents read configured local mirror directories for existing knowledge
+2. When an agent needs new research, it submits a question to `/wiki/{name}/mcp` or `/wiki/{name}/api/research`
 3. The server queues the question for that wiki and spawns its configured research agent
-4. The research agent investigates the question, potentially creating or updating pages under `wiki-{name}/wiki/`
-5. The answer is returned with `[[wikilinks]]` resolved to `wiki-{name}/...` file paths
+4. The research agent investigates the question, potentially creating or updating pages under the server wiki repo
+5. The answer is returned with `[[wikilinks]]` resolved to the client's local mirror path
 6. Agents sync their local wiki copies automatically
 
 ## Agent rules
@@ -25,7 +25,7 @@ Configure your agents to use the wiki by adding rules to your `CLAUDE.md`, `AGEN
 ```markdown
 ## Wiki
 
-* The `wiki-<name>/` directory contains a knowledge base on <your topics>.
+* The configured wiki mirror directory contains a knowledge base on <your topics>.
   Consult it before making decisions in these areas.
 * Do not modify wiki files directly.
 ```
@@ -40,7 +40,7 @@ N.B.: tool names use Claude Code conventions in the snippet below.
 ```markdown
 ## Wiki
 
-* The `wiki-<name>/` directory contains a knowledge base on <your topics>.
+* The configured wiki mirror directory contains a knowledge base on <your topics>.
   Consult it before making decisions in these areas.
 * Do not modify wiki files directly.
 * When the wiki doesn't cover a topic you need, use that wiki server's `research` MCP
@@ -52,7 +52,7 @@ N.B.: tool names use Claude Code conventions in the snippet below.
 
 ## Automatic wiki sync (client-server mode)
 
-In client-server mode, local `wiki-{name}/` directories need to stay in sync with the server. You can automate this using your agent harness's lifecycle hooks to run `wikidesk sync` at the start and end of each session.
+In client-server mode, local mirror directories need to stay in sync with the server. You can automate this using your agent harness's lifecycle hooks to run `wikidesk sync` at the start and end of each session.
 
 <details>
 <summary>Claude Code -- hooks in settings.json</summary>
@@ -160,7 +160,7 @@ cargo install wikidesk-server
 
 ### 2. Set up your LLM-wiki
 
-Follow the [LLM-wiki setup instructions](https://github.com/karpathy/LLM-wiki) to create and configure each wiki repo. Name each repo `wiki-{name}` next to `config.toml`; wikidesk requires `wiki-{name}/wiki/` to exist. Keep wikidesk prompt templates outside `wiki-{name}/wiki/` so the research agent cannot edit its own prompt.
+Follow the [LLM-wiki setup instructions](https://github.com/karpathy/LLM-wiki) to create and configure each wiki repo. Name each repo `wiki-{name}` next to `config.toml`; the special wiki name `default` uses repo directory `wiki`. wikidesk requires each repo to contain a `wiki/` content root. Keep wikidesk prompt templates outside that content root so the research agent cannot edit its own prompt.
 
 ### 3. Create a configuration file
 
@@ -171,7 +171,7 @@ See [`config.example.toml`](config.example.toml) for all options.
 bind_address = "127.0.0.1:1238"
 
 [[wikis]]
-name = "rlhf" # derives ./wiki-rlhf and /rlhf
+name = "rlhf" # derives ./wiki-rlhf and /wiki/rlhf
 description = "RLHF, preference optimization, DPO/PPO/GRPO/RLOO, reward modeling, and alignment training methods."
 prompt_template = "prompts/rlhf.md"
 
@@ -304,11 +304,18 @@ This also provides sandboxing for the research agent.
 
 ## Consumer workspace setup
 
+HTTP paths are:
+
+- `GET /wiki` -- list configured wikis
+- `POST /wiki/{name}/api/research` -- submit research over HTTP; request may include `local_path` for wikilink rendering
+- `POST /wiki/{name}/api/sync` -- sync a local mirror
+- `/wiki/{name}/mcp` -- MCP endpoint for that wiki
+
 There are two ways for agents to consume the wiki. Choose one.
 
 ### Client-server mode (recommended)
 
-Each agent machine runs `wikidesk`, which communicates with the server over HTTP. The client syncs local `wiki-{name}/` copies automatically after each research request.
+Each agent machine runs `wikidesk`, which communicates with the server over HTTP. The client syncs configured local mirror paths automatically after each research request.
 
 ![Client-server deployment mode](docs/diagrams/client-server.drawio.svg)
 
@@ -346,9 +353,12 @@ cargo install wikidesk
 ```sh
 # Print a prompt for your coding agent to configure this repo's AGENTS.md/CLAUDE.md.
 wikidesk agent setup http://your-server:1238 rlhf rust-notes
+# With local path overrides: wikidesk agent setup http://your-server:1238 audio:wiki ml:wiki-ml
 
 export WIKIDESK_SERVER_URL="http://your-server:1238"
 export WIKIDESK_WIKIS="rlhf,rust-notes"
+# Optional local mirror override syntax: name:relative/path, e.g. audio:wiki,ml:wiki-ml
+# Local paths must be relative slash paths with no . or .. components.
 
 # Submit a question to one wiki and sync it
 wikidesk research -w rlhf "What is RLHF and how does it relate to DPO?"
@@ -357,6 +367,8 @@ wikidesk research -w rlhf "What is RLHF and how does it relate to DPO?"
 wikidesk sync
 wikidesk sync -w rlhf
 ```
+
+`wikidesk sync` refuses to write into an existing directory unless it already has wikidesk's `.gitignore` marker. Move existing files out of the target path before the first sync.
 
 ### Mount/symlink mode
 
@@ -371,7 +383,7 @@ Agents connect to the server directly via MCP. The wiki directory is mounted or 
 Add wikidesk to your agent's MCP configuration:
 
 ```sh
-claude mcp add wikidesk-rlhf --transport http http://your-server:1238/rlhf/mcp
+claude mcp add wikidesk-rlhf --transport http http://your-server:1238/wiki/rlhf/mcp
 ```
 
 Or add it manually to `.mcp.json`:
@@ -381,7 +393,7 @@ Or add it manually to `.mcp.json`:
   "mcpServers": {
     "wikidesk-rlhf": {
       "type": "streamable-http",
-      "url": "http://your-server:1238/rlhf/mcp"
+      "url": "http://your-server:1238/wiki/rlhf/mcp"
     }
   }
 }
@@ -390,7 +402,7 @@ Or add it manually to `.mcp.json`:
 The server exposes two MCP tools:
 
 - **`research`** -- Submit a research question. Returns a `task_id`.
-- **`get_result`** -- Poll for the result of a research task.
+- **`get_result`** -- Poll for the result of a research task. Optionally pass `local_path` to render wikilinks for a non-default local mirror path.
 
 #### Mount the wiki (read-only)
 
@@ -465,7 +477,7 @@ ln -s /mnt/c/path/to/wiki-rlhf/wiki ./wiki-rlhf
 | Key | Default | Description |
 |-----|---------|-------------|
 | `bind_address` | `127.0.0.1:1238` | Top-level HTTP bind address |
-| `[[wikis]].name` | *(required)* | Wiki slug. Derives repo `wiki-{name}`, base path `/{name}`, and client mirror `wiki-{name}`. |
+| `[[wikis]].name` | *(required)* | Wiki slug. Derives server repo `wiki-{name}` (`default` uses `wiki`), base path `/wiki/{name}`, and default client mirror `wiki-{name}` (`default` uses `wiki`). |
 | `[[wikis]].description` | *(required)* | What this wiki covers. Used by MCP descriptions and `wikidesk agent setup`. |
 | `[[wikis]].runner` | `generic` | Runner type: `generic`, `stream-json`, or `acp` (see below) |
 | `[[wikis]].agent_command` | *(required)* | Command to spawn the research agent. Must contain exactly one `$PROMPT` element (except for `acp` runner). |

@@ -5,7 +5,9 @@ use async_trait::async_trait;
 use clap::{Parser, Subcommand};
 use wikidesk_shared::{
     FileEntry, ListWikisResponse, ResearchRequest, ResearchResponse, SyncPlan, SyncRequest,
-    SyncResponse, SyncSummary, WikiInfo, is_valid_wiki_name, snapshot_local_mirror,
+    SyncResponse, SyncSummary, WIKI_LIST_PATH, WikiInfo, derived_wiki_path,
+    ensure_local_mirror_safe, is_valid_wiki_name, snapshot_local_mirror, validate_local_path,
+    wiki_base_path,
 };
 
 #[derive(Parser)]
@@ -49,9 +51,23 @@ enum AgentCommand {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConfiguredWiki {
+    name: String,
+    local_path: String,
+}
+
+fn wiki_spec(name: &str, local_path: &str) -> String {
+    if local_path == derived_wiki_path(name) {
+        name.to_string()
+    } else {
+        format!("{name}:{local_path}")
+    }
+}
+
 struct ClientConfig {
     server_url: String,
-    wikis: Vec<String>,
+    wikis: Vec<ConfiguredWiki>,
 }
 
 impl ClientConfig {
@@ -61,12 +77,12 @@ impl ClientConfig {
                 .map_err(|_| anyhow::anyhow!("WIKIDESK_SERVER_URL not set"))?,
         );
         let wikis = parse_wikis(&std::env::var("WIKIDESK_WIKIS").map_err(|_| {
-            anyhow::anyhow!("WIKIDESK_WIKIS not set (example: WIKIDESK_WIKIS=rlhf,rust-notes)")
+            anyhow::anyhow!("WIKIDESK_WIKIS not set (example: WIKIDESK_WIKIS=default,ml:wiki-ml)")
         })?)?;
         Ok(Self { server_url, wikis })
     }
 
-    fn require_wiki(&self, wiki: Option<String>) -> anyhow::Result<String> {
+    fn require_wiki(&self, wiki: Option<String>) -> anyhow::Result<ConfiguredWiki> {
         let Some(wiki) = wiki else {
             anyhow::bail!(
                 "--wiki/-w is required (configured wikis: {})",
@@ -76,26 +92,32 @@ impl ClientConfig {
         self.validate_wiki(wiki)
     }
 
-    fn selected_wikis(&self, wiki: Option<String>) -> anyhow::Result<Vec<String>> {
+    fn selected_wikis(&self, wiki: Option<String>) -> anyhow::Result<Vec<ConfiguredWiki>> {
         match wiki {
             Some(wiki) => Ok(vec![self.validate_wiki(wiki)?]),
             None => Ok(self.wikis.clone()),
         }
     }
 
-    fn validate_wiki(&self, wiki: String) -> anyhow::Result<String> {
-        if self.wikis.contains(&wiki) {
-            Ok(wiki)
-        } else {
-            anyhow::bail!(
-                "unknown wiki '{wiki}' (configured wikis: {})",
-                self.configured_wikis()
-            );
-        }
+    fn validate_wiki(&self, wiki: String) -> anyhow::Result<ConfiguredWiki> {
+        self.wikis
+            .iter()
+            .find(|configured| configured.name == wiki)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown wiki '{wiki}' (configured wikis: {})",
+                    self.configured_wikis()
+                )
+            })
     }
 
     fn configured_wikis(&self) -> String {
-        self.wikis.join(", ")
+        self.wikis
+            .iter()
+            .map(|wiki| wiki.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -103,28 +125,64 @@ fn trim_server_url(raw: &str) -> String {
     raw.trim_end_matches('/').to_string()
 }
 
-fn parse_wikis(raw: &str) -> anyhow::Result<Vec<String>> {
-    let mut seen = HashSet::new();
-    let mut wikis = Vec::new();
-    for wiki in raw
-        .split(',')
-        .map(str::trim)
-        .filter(|wiki| !wiki.is_empty())
-    {
-        if !is_valid_wiki_name(wiki) {
-            anyhow::bail!(
-                "invalid wiki name '{wiki}' in WIKIDESK_WIKIS (use lowercase letters, digits, and hyphens; start and end with a letter or digit)"
-            );
-        }
-        if !seen.insert(wiki.to_string()) {
-            anyhow::bail!("duplicate wiki name '{wiki}' in WIKIDESK_WIKIS");
-        }
-        wikis.push(wiki.to_string());
-    }
+fn parse_wikis(raw: &str) -> anyhow::Result<Vec<ConfiguredWiki>> {
+    let wikis = parse_wiki_specs([raw])?;
     if wikis.is_empty() {
         anyhow::bail!("WIKIDESK_WIKIS must name at least one wiki");
     }
     Ok(wikis)
+}
+
+fn parse_wiki_specs<I, S>(specs: I) -> anyhow::Result<Vec<ConfiguredWiki>>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut seen_names = HashSet::new();
+    let mut seen_paths = HashSet::new();
+    let mut wikis = Vec::new();
+    for raw in specs {
+        for spec in raw
+            .as_ref()
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let wiki = parse_wiki_spec(spec)?;
+            if !seen_names.insert(wiki.name.clone()) {
+                anyhow::bail!("duplicate wiki name '{}'", wiki.name);
+            }
+            if !seen_paths.insert(wiki.local_path.clone()) {
+                anyhow::bail!("duplicate local_path '{}'", wiki.local_path);
+            }
+            wikis.push(wiki);
+        }
+    }
+    Ok(wikis)
+}
+
+fn parse_wiki_spec(spec: &str) -> anyhow::Result<ConfiguredWiki> {
+    let (name, local_path) = match spec.split_once(':') {
+        Some((name, local_path)) => (name.trim(), Some(local_path.trim())),
+        None => (spec.trim(), None),
+    };
+    if !is_valid_wiki_name(name) {
+        anyhow::bail!(
+            "invalid wiki name '{name}' (use lowercase letters, digits, and hyphens; start and end with a letter or digit)"
+        );
+    }
+    let local_path = match local_path {
+        Some(path) => {
+            validate_local_path(path)
+                .map_err(|e| anyhow::anyhow!("invalid local_path for wiki '{name}': {e}"))?;
+            path.to_string()
+        }
+        None => derived_wiki_path(name),
+    };
+    Ok(ConfiguredWiki {
+        name: name.to_string(),
+        local_path,
+    })
 }
 
 struct ClientApp<T> {
@@ -133,38 +191,50 @@ struct ClientApp<T> {
 }
 
 impl<T: WikideskTransport> ClientApp<T> {
-    async fn research(&self, wiki: String, question: String) -> anyhow::Result<String> {
-        let result = self.transport.research(&wiki, question).await?;
+    async fn research(&self, wiki: ConfiguredWiki, question: String) -> anyhow::Result<String> {
+        let result = self
+            .transport
+            .research(&wiki.name, &wiki.local_path, question)
+            .await?;
         self.sync_one(&wiki).await?;
         Ok(result.answer)
     }
 
-    async fn sync_one(&self, wiki: &str) -> anyhow::Result<SyncSummary> {
+    async fn sync_one(&self, wiki: &ConfiguredWiki) -> anyhow::Result<SyncSummary> {
         let wiki_path = self.wiki_path(wiki);
+        ensure_local_mirror_safe(&wiki_path)?;
         let local_files = snapshot_local_mirror(&wiki_path)?;
-        let sync = self.transport.sync(wiki, local_files).await?;
+        let sync = self.transport.sync(&wiki.name, local_files).await?;
         let plan = SyncPlan::new(sync);
         let summary = plan.summary();
         plan.apply(&wiki_path)?;
         Ok(summary)
     }
 
-    async fn sync_all(&self, wikis: &[String]) -> anyhow::Result<Vec<(String, SyncSummary)>> {
+    async fn sync_all(
+        &self,
+        wikis: &[ConfiguredWiki],
+    ) -> anyhow::Result<Vec<(String, SyncSummary)>> {
         let mut summaries = Vec::with_capacity(wikis.len());
         for wiki in wikis {
-            summaries.push((wiki.clone(), self.sync_one(wiki).await?));
+            summaries.push((wiki.name.clone(), self.sync_one(wiki).await?));
         }
         Ok(summaries)
     }
 
-    fn wiki_path(&self, wiki: &str) -> PathBuf {
-        self.workspace.join(format!("wiki-{wiki}"))
+    fn wiki_path(&self, wiki: &ConfiguredWiki) -> PathBuf {
+        self.workspace.join(&wiki.local_path)
     }
 }
 
 #[async_trait]
 trait WikideskTransport {
-    async fn research(&self, wiki: &str, question: String) -> anyhow::Result<ResearchResponse>;
+    async fn research(
+        &self,
+        wiki: &str,
+        local_path: &str,
+        question: String,
+    ) -> anyhow::Result<ResearchResponse>;
     async fn sync(&self, wiki: &str, files: Vec<FileEntry>) -> anyhow::Result<SyncResponse>;
 }
 
@@ -189,7 +259,7 @@ impl HttpTransport {
     async fn list_wikis(&self) -> anyhow::Result<ListWikisResponse> {
         Ok(self
             .client
-            .get(format!("{}/api/wikis", self.server_url))
+            .get(format!("{}{}", self.server_url, WIKI_LIST_PATH))
             .send()
             .await?
             .error_for_status()?
@@ -200,11 +270,23 @@ impl HttpTransport {
 
 #[async_trait]
 impl WikideskTransport for HttpTransport {
-    async fn research(&self, wiki: &str, question: String) -> anyhow::Result<ResearchResponse> {
+    async fn research(
+        &self,
+        wiki: &str,
+        local_path: &str,
+        question: String,
+    ) -> anyhow::Result<ResearchResponse> {
         Ok(self
             .client
-            .post(format!("{}/{wiki}/api/research", self.server_url))
-            .json(&ResearchRequest { question })
+            .post(format!(
+                "{}{}/api/research",
+                self.server_url,
+                wiki_base_path(wiki)
+            ))
+            .json(&ResearchRequest {
+                question,
+                local_path: Some(local_path.to_string()),
+            })
             .send()
             .await?
             .error_for_status()?
@@ -215,7 +297,11 @@ impl WikideskTransport for HttpTransport {
     async fn sync(&self, wiki: &str, files: Vec<FileEntry>) -> anyhow::Result<SyncResponse> {
         Ok(self
             .client
-            .post(format!("{}/{wiki}/api/sync", self.server_url))
+            .post(format!(
+                "{}{}/api/sync",
+                self.server_url,
+                wiki_base_path(wiki)
+            ))
             .json(&SyncRequest { files })
             .send()
             .await?
@@ -235,19 +321,18 @@ async fn render_agent_setup(
     Ok(render_agent_setup_prompt(&transport.server_url, &wikis))
 }
 
-fn select_wikis(available: Vec<WikiInfo>, requested: Vec<String>) -> anyhow::Result<Vec<WikiInfo>> {
-    let mut seen = HashSet::new();
-    for wiki in &requested {
-        if !is_valid_wiki_name(wiki) {
-            anyhow::bail!(
-                "invalid wiki name '{wiki}' (use lowercase letters, digits, and hyphens; start and end with a letter or digit)"
-            );
-        }
-        if !seen.insert(wiki) {
-            anyhow::bail!("duplicate wiki name '{wiki}'");
-        }
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SelectedWiki {
+    name: String,
+    description: String,
+    local_path: String,
+}
 
+fn select_wikis(
+    available: Vec<WikiInfo>,
+    requested: Vec<String>,
+) -> anyhow::Result<Vec<SelectedWiki>> {
+    let requested = parse_wiki_specs(requested.iter().map(String::as_str))?;
     let mut by_name = HashMap::new();
     let mut ordered = Vec::new();
     for wiki in available {
@@ -255,7 +340,11 @@ fn select_wikis(available: Vec<WikiInfo>, requested: Vec<String>) -> anyhow::Res
             anyhow::bail!("server returned empty description for wiki '{}'", wiki.name);
         }
         by_name.insert(wiki.name.clone(), wiki.clone());
-        ordered.push(wiki);
+        ordered.push(SelectedWiki {
+            local_path: derived_wiki_path(&wiki.name),
+            name: wiki.name,
+            description: wiki.description,
+        });
     }
 
     if requested.is_empty() {
@@ -264,10 +353,14 @@ fn select_wikis(available: Vec<WikiInfo>, requested: Vec<String>) -> anyhow::Res
 
     let mut selected = Vec::with_capacity(requested.len());
     let mut missing = Vec::new();
-    for name in requested {
-        match by_name.get(&name) {
-            Some(wiki) => selected.push(wiki.clone()),
-            None => missing.push(name),
+    for configured in requested {
+        match by_name.get(&configured.name) {
+            Some(wiki) => selected.push(SelectedWiki {
+                name: wiki.name.clone(),
+                description: wiki.description.clone(),
+                local_path: configured.local_path,
+            }),
+            None => missing.push(configured.name),
         }
     }
     if !missing.is_empty() {
@@ -282,19 +375,19 @@ fn select_wikis(available: Vec<WikiInfo>, requested: Vec<String>) -> anyhow::Res
     Ok(selected)
 }
 
-fn render_agent_setup_prompt(server_url: &str, wikis: &[WikiInfo]) -> String {
+fn render_agent_setup_prompt(server_url: &str, wikis: &[SelectedWiki]) -> String {
     let wiki_names = wikis
         .iter()
-        .map(|wiki| wiki.name.as_str())
+        .map(|wiki| wiki_spec(&wiki.name, &wiki.local_path))
         .collect::<Vec<_>>()
         .join(",");
     let wiki_list = wikis
         .iter()
         .map(|wiki| {
             format!(
-                "- `{}` (`wiki-{}/`): {}",
+                "- `{}` (`{}/`): {}",
                 wiki.name,
-                wiki.name,
+                wiki.local_path,
                 compact_whitespace(&wiki.description)
             )
         })
@@ -309,7 +402,7 @@ fn render_agent_setup_prompt(server_url: &str, wikis: &[WikiInfo]) -> String {
     format!(
         r#"Configure this repository to use wikidesk.
 
-Wikidesk keeps local wiki mirrors in directories named `wiki-{{name}}/`. A local wiki mirror is managed by `wikidesk sync`; do not edit files inside it directly.
+Wikidesk keeps local wiki mirrors in configured relative paths. A local wiki mirror is managed by `wikidesk sync`; do not edit files inside it directly.
 
 Use this server and wiki set:
 
@@ -325,7 +418,7 @@ Wikis to configure:
 Do these steps:
 
 1. Persist `WIKIDESK_SERVER_URL` and `WIKIDESK_WIKIS` in this repository's local environment mechanism, if it has one.
-2. Run `wikidesk sync` once as a connection test. It should create or update the `wiki-{{name}}/` directories and place a `.gitignore` file in each one.
+2. Run `wikidesk sync` once as a connection test. It should create or update the listed local mirror paths and place a `.gitignore` file in each one.
 3. If this agent environment supports lifecycle hooks, configure them to run `wikidesk sync` before and after agent sessions or tool use. If hooks cannot be configured, mention in AGENTS.md/CLAUDE.md that agents should run `wikidesk sync` at session start and end.
 4. Update AGENTS.md, and CLAUDE.md if this repository uses it, with brief wiki-use rules equivalent to:
 
@@ -338,10 +431,10 @@ Local wiki mirrors are read-only directories managed by wikidesk:
 Use these local wiki mirrors before answering questions related to their topics. If a local mirror may not cover the full picture, including adjacent knowledge that may not have been researched yet, run the relevant research command:
 {research_commands}
 
-Never edit `wiki-*` files directly.
+Never edit local wiki mirror files directly.
 ```
 
-5. If this agent environment supports file permissions, deny writes under `wiki-*`. If it does not, rely on the AGENTS.md/CLAUDE.md rule above.
+5. If this agent environment supports file permissions, deny writes under the listed local mirror paths. If it does not, rely on the AGENTS.md/CLAUDE.md rule above.
 "#
     )
 }
@@ -413,20 +506,33 @@ mod tests {
 
     #[derive(Default)]
     struct FakeTransport {
-        research_calls: Arc<Mutex<Vec<(String, String)>>>,
+        research_calls: Arc<Mutex<Vec<(String, String, String)>>>,
         sync_calls: Arc<Mutex<Vec<String>>>,
         sync_snapshots: Arc<Mutex<Vec<Vec<String>>>>,
         research_response: Option<ResearchResponse>,
         sync_response: Option<SyncResponse>,
     }
 
+    fn configured(name: &str, local_path: &str) -> ConfiguredWiki {
+        ConfiguredWiki {
+            name: name.into(),
+            local_path: local_path.into(),
+        }
+    }
+
     #[async_trait]
     impl WikideskTransport for FakeTransport {
-        async fn research(&self, wiki: &str, question: String) -> anyhow::Result<ResearchResponse> {
-            self.research_calls
-                .lock()
-                .unwrap()
-                .push((wiki.to_string(), question));
+        async fn research(
+            &self,
+            wiki: &str,
+            local_path: &str,
+            question: String,
+        ) -> anyhow::Result<ResearchResponse> {
+            self.research_calls.lock().unwrap().push((
+                wiki.to_string(),
+                local_path.to_string(),
+                question,
+            ));
             Ok(self.research_response.clone().unwrap())
         }
 
@@ -446,18 +552,26 @@ mod tests {
     #[test]
     fn parses_wiki_list() {
         assert_eq!(
-            parse_wikis("rlhf, rust-notes").unwrap(),
-            ["rlhf", "rust-notes"]
+            parse_wikis("default, ml:mirrors/ml").unwrap(),
+            [
+                configured("default", "wiki"),
+                configured("ml", "mirrors/ml")
+            ]
         );
         assert!(parse_wikis("Wiki").is_err());
         assert!(parse_wikis("rlhf,rlhf").is_err());
+        assert!(parse_wikis("audio:wiki,default:wiki").is_err());
+        assert!(parse_wikis("ml:../wiki").is_err());
     }
 
     #[test]
     fn research_requires_explicit_wiki() {
         let config = ClientConfig {
             server_url: "http://example.test".into(),
-            wikis: vec!["rlhf".into(), "rust".into()],
+            wikis: vec![
+                configured("rlhf", "wiki-rlhf"),
+                configured("rust", "wiki-rust"),
+            ],
         };
 
         let err = config.require_wiki(None).unwrap_err().to_string();
@@ -470,7 +584,7 @@ mod tests {
     fn rejects_unknown_wiki() {
         let config = ClientConfig {
             server_url: "http://example.test".into(),
-            wikis: vec!["rlhf".into()],
+            wikis: vec![configured("rlhf", "wiki-rlhf")],
         };
 
         let err = config
@@ -495,11 +609,12 @@ mod tests {
                     description: "Retrieval.".into(),
                 },
             ],
-            vec!["knowledge".into()],
+            vec!["knowledge:wiki".into()],
         )
         .unwrap();
 
         assert_eq!(selected[0].name, "knowledge");
+        assert_eq!(selected[0].local_path, "wiki");
     }
 
     #[test]
@@ -507,22 +622,24 @@ mod tests {
         let prompt = render_agent_setup_prompt(
             "http://example.test",
             &[
-                WikiInfo {
+                SelectedWiki {
                     name: "knowledge".into(),
                     description: "Retrieval and epistemology.".into(),
+                    local_path: "wiki".into(),
                 },
-                WikiInfo {
+                SelectedWiki {
                     name: "ml".into(),
                     description: "Machine learning.".into(),
+                    local_path: "wiki-ml".into(),
                 },
             ],
         );
 
         assert!(prompt.contains("export WIKIDESK_SERVER_URL=http://example.test"));
-        assert!(prompt.contains("export WIKIDESK_WIKIS=knowledge,ml"));
-        assert!(prompt.contains("`knowledge` (`wiki-knowledge/`): Retrieval and epistemology."));
+        assert!(prompt.contains("export WIKIDESK_WIKIS=knowledge:wiki,ml"));
+        assert!(prompt.contains("`knowledge` (`wiki/`): Retrieval and epistemology."));
         assert!(prompt.contains("wikidesk research -w knowledge \"<question>\""));
-        assert!(prompt.contains("Never edit `wiki-*` files directly."));
+        assert!(prompt.contains("Never edit local wiki mirror files directly."));
     }
 
     #[tokio::test]
@@ -549,14 +666,14 @@ mod tests {
         };
 
         let answer = app
-            .research("rlhf".into(), "question?".into())
+            .research(configured("rlhf", "wiki-rlhf"), "question?".into())
             .await
             .unwrap();
 
         assert_eq!(answer, "answer");
         assert_eq!(
             research_calls.lock().unwrap().as_slice(),
-            &[("rlhf".into(), "question?".into())]
+            &[("rlhf".into(), "wiki-rlhf".into(), "question?".into())]
         );
         assert_eq!(sync_calls.lock().unwrap().as_slice(), &["rlhf"]);
         assert_eq!(
@@ -574,6 +691,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let wiki = dir.path().join("wiki-rlhf");
         std::fs::create_dir_all(&wiki).unwrap();
+        std::fs::write(wiki.join(".gitignore"), "*\n").unwrap();
         std::fs::write(wiki.join("old.md"), "old").unwrap();
         let transport = FakeTransport {
             sync_response: Some(SyncResponse {
@@ -590,7 +708,10 @@ mod tests {
             workspace: dir.path().to_path_buf(),
         };
 
-        let summary = app.sync_one("rlhf").await.unwrap();
+        let summary = app
+            .sync_one(&configured("rlhf", "wiki-rlhf"))
+            .await
+            .unwrap();
 
         assert_eq!(
             summary,
@@ -621,7 +742,9 @@ mod tests {
             workspace: dir.path().to_path_buf(),
         };
 
-        app.sync_one("rlhf").await.unwrap();
+        app.sync_one(&configured("rlhf", "wiki-rlhf"))
+            .await
+            .unwrap();
 
         let snapshots = sync_snapshots.lock().unwrap();
         assert_eq!(snapshots.len(), 1);
@@ -639,7 +762,13 @@ mod tests {
             workspace: dir.path().to_path_buf(),
         };
 
-        let summaries = app.sync_all(&["rlhf".into(), "rust".into()]).await.unwrap();
+        let summaries = app
+            .sync_all(&[
+                configured("rlhf", "wiki-rlhf"),
+                configured("rust", "wiki-rust"),
+            ])
+            .await
+            .unwrap();
 
         assert_eq!(sync_calls.lock().unwrap().as_slice(), &["rlhf", "rust"]);
         assert_eq!(summaries.len(), 2);

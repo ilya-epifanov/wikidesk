@@ -3,8 +3,9 @@
 
 # Each wiki is named by a lowercase slug. The name derives:
 # - server wiki repo: ./wiki-<name>/ (must contain a wiki/ subdirectory)
-# - HTTP base path: /<name>
-# - client mirror path: ./wiki-<name>/
+# - HTTP base path: /wiki/<name>
+# - default client mirror path: ./wiki-<name>/
+# The special name "default" uses ./wiki/ for both server repo and client mirror.
 [[wikis]]
 name = "rlhf"
 description = "RLHF, preference optimization, DPO/PPO/GRPO/RLOO, reward modeling, and alignment training methods."
@@ -17,7 +18,7 @@ description = "RLHF, preference optimization, DPO/PPO/GRPO/RLOO, reward modeling
 
 # Command for spawning the research agent.
 # The literal "$PROMPT" element is replaced with the rendered prompt.
-# Executed directly (no shell) with wiki-<name>/ as the working directory.
+# Executed directly (no shell) with the derived wiki repo as the working directory.
 #
 # SECURITY WARNING: The research agent runs with full, unrestricted
 # permissions on the host. Flags like --dangerously-skip-permissions
@@ -36,7 +37,7 @@ agent_command = ["claude", "-p", "$PROMPT", "--dangerously-skip-permissions"]
 # ACP (requires claude-agent-acp):
 # runner = "acp"
 # agent_command = ["claude-agent-acp"]
-# Note: For ACP, configure bypass permissions via wiki-<name>/.claude/settings.json:
+# Note: For ACP, configure bypass permissions via the wiki repo's .claude/settings.json:
 #   { "permissions": { "defaultMode": "bypass" } }
 
 # How long to keep completed/failed task results before evicting (seconds, default: 7200)
@@ -46,7 +47,7 @@ agent_command = ["claude", "-p", "$PROMPT", "--dangerously-skip-permissions"]
 # agent_timeout_secs = 1800
 
 # Path to the prompt template file, relative to this config file (must contain a {question} placeholder).
-# Keep this outside wiki-<name>/wiki/ so the research agent cannot edit its own prompt.
+# Keep this outside the wiki repo's wiki/ content root so the research agent cannot edit its own prompt.
 prompt_template = "prompts/rlhf.md"
 
 # Optional MCP overrides. If omitted, these are derived from description.
