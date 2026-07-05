@@ -6,7 +6,7 @@ use rmcp::transport::streamable_http_server::{
 use tokio_util::sync::CancellationToken;
 use wikidesk_shared::{ListWikisResponse, WIKI_LIST_PATH};
 
-use crate::{api, config::ServerConfig, queue, server};
+use crate::{api, config::ServerConfig, server, wiki_instance};
 
 pub async fn run(cfg: ServerConfig) -> anyhow::Result<()> {
     tracing::info!(
@@ -38,11 +38,16 @@ pub async fn run(cfg: ServerConfig) -> anyhow::Result<()> {
         let wiki_name = wiki_config.name.clone();
         let base_path = wiki_config.base_path();
         let wiki_repo = wiki_config.wiki_repo.clone();
-        let (app_state, rx) = queue::AppState::new(wiki_config);
-        let state = Arc::new(app_state);
+        let git_sync_enabled = wiki_config.git_sync.is_some();
+        let (wiki, rx) = wiki_instance::WikiInstance::new(wiki_config);
+        let state = Arc::new(wiki);
+        state.prepare_executor().await?;
 
-        background.spawn(queue::run_worker(state.clone(), rx));
-        background.spawn(queue::run_reaper(state.clone()));
+        background.spawn(wiki_instance::run_worker(state.clone(), rx));
+        background.spawn(wiki_instance::run_reaper(state.clone()));
+        if git_sync_enabled {
+            background.spawn(wiki_instance::run_remote_sync_loop(state.clone()));
+        }
 
         let service: StreamableHttpService<server::ResearchServer, LocalSessionManager> =
             StreamableHttpService::new(

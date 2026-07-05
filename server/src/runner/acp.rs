@@ -8,7 +8,8 @@ use async_trait::async_trait;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{debug, error, instrument};
 
-use super::{AgentProcess, FailureKind, Runner, RunnerError, StderrCapture, substitute_prompt};
+use super::process::{AgentProcess, StderrCapture, timeout_with_stderr};
+use super::{FailureKind, Runner, RunnerError};
 
 #[derive(Debug, Clone, Copy, strum::Display)]
 #[strum(serialize_all = "snake_case")]
@@ -53,8 +54,7 @@ impl Runner for AcpRunner {
         working_dir: &Path,
         timeout: Duration,
     ) -> Result<Option<String>, RunnerError> {
-        let args = substitute_prompt(command, prompt);
-        let mut process = AgentProcess::spawn_with_stdin(&args, working_dir)?;
+        let mut process = AgentProcess::spawn_with_stdin(command, prompt, working_dir)?;
 
         let stdin = process.child.stdin.take().expect("stdin piped");
         let stdout = process
@@ -100,20 +100,14 @@ impl Runner for AcpRunner {
                 .map_err(|e| protocol_err(AcpOp::Connect, stderr, e))?
         };
 
-        let outcome = tokio::time::timeout(timeout, drive).await;
+        let outcome =
+            timeout_with_stderr(stderr_buf.clone(), timeout, drive, "ACP agent timed out").await;
 
         // DECISION: `kill().await` sends SIGKILL and reaps before return.
         // `kill_on_drop` only schedules the signal, leaving a brief zombie window.
         process.kill().await;
 
-        outcome
-            .map_err(|_| {
-                error!(stderr = %stderr_buf.render(), "ACP agent timed out");
-                RunnerError::Timeout {
-                    secs: timeout.as_secs(),
-                }
-            })?
-            .map_err(RunnerError::from)?;
+        outcome?.map_err(RunnerError::from)?;
         let result = mem::take(&mut *collected_text.lock().unwrap());
         Ok((!result.is_empty()).then_some(result))
     }

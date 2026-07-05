@@ -13,9 +13,9 @@ use rmcp::{
     tool, tool_router,
 };
 
-use crate::delivery::DeliveryError;
-use crate::queue::{AppState, TaskStatus};
+use crate::queue::TaskStatus;
 use crate::surface::{ResearchSurface, SurfaceError};
+use crate::wiki_instance::WikiInstance;
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ResearchParams {
@@ -33,12 +33,12 @@ pub struct GetResultParams {
 
 #[derive(Debug, Clone)]
 pub struct ResearchServer {
-    state: Arc<AppState>,
+    state: Arc<WikiInstance>,
     tool_router: ToolRouter<Self>,
 }
 
 impl ResearchServer {
-    pub fn new(state: Arc<AppState>) -> Self {
+    pub fn new(state: Arc<WikiInstance>) -> Self {
         let mut tool_router = Self::tool_router();
         if let Some(route) = tool_router.map.get_mut("research") {
             let base = route.attr.description.as_deref().unwrap_or_default();
@@ -71,19 +71,13 @@ impl ResearchServer {
         &self,
         Parameters(params): Parameters<GetResultParams>,
     ) -> Result<String, ErrorData> {
-        let surface = ResearchSurface::new(self.state.clone());
-        match surface.get_status(&params.task_id).await {
-            Some(TaskStatus::Done { answer }) => {
-                let answer = surface
-                    .deliver(Some(TaskStatus::Done { answer }), params.local_path)
-                    .await
-                    .map_err(mcp_surface_error)?;
-                Ok(serde_json::json!({ "status": "done", "answer": answer }).to_string())
-            }
-            Some(TaskStatus::Failed { error }) => {
-                Err(mcp_delivery_error(DeliveryError::ResearchFailed(error)))
-            }
-            Some(status) => Ok(serde_json::to_string(&status).unwrap()),
+        match ResearchSurface::new(self.state.clone())
+            .poll_result(&params.task_id, params.local_path)
+            .await
+            .map_err(mcp_surface_error)?
+        {
+            Some(TaskStatus::Failed { error }) => Err(mcp_research_failed(error)),
+            Some(result) => Ok(serde_json::to_string(&result).unwrap()),
             None => Err(ErrorData::resource_not_found(
                 format!("unknown task_id '{}'", params.task_id),
                 None,
@@ -101,8 +95,8 @@ fn mcp_surface_error(err: SurfaceError) -> ErrorData {
     }
 }
 
-fn mcp_delivery_error(err: DeliveryError) -> ErrorData {
-    mcp_surface_error(SurfaceError::Delivery(err))
+fn mcp_research_failed(error: String) -> ErrorData {
+    ErrorData::internal_error(format!("research failed: {error}"), None)
 }
 
 impl ServerHandler for ResearchServer {

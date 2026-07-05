@@ -2,13 +2,15 @@ use clap::Parser;
 
 mod api;
 mod config;
-mod delivery;
 mod queue;
+mod remote_sync;
+mod research_task;
 mod rewrite;
 mod runner;
 mod runtime;
 mod server;
 mod surface;
+mod wiki_instance;
 
 #[derive(Parser)]
 #[command(name = "wikidesk", about = "MCP server for LLM wiki research")]

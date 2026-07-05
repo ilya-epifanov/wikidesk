@@ -4,11 +4,12 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use wikidesk_shared::{ResearchRequest, ResearchResponse, SyncRequest, SyncResponse};
+use wikidesk_shared::sync::{SyncRequest, SyncResponse, compute_sync};
+use wikidesk_shared::{ResearchRequest, ResearchResponse};
 
-use crate::delivery::DeliveryError;
-use crate::queue::{AppState, QueueFullError};
+use crate::queue::QueueFullError;
 use crate::surface::{ResearchSurface, SurfaceError};
+use crate::wiki_instance::WikiInstance;
 
 pub(crate) enum ApiError {
     BadRequest(String),
@@ -39,14 +40,14 @@ impl From<SurfaceError> for ApiError {
             SurfaceError::InvalidLocalPath(error) => {
                 Self::BadRequest(format!("invalid local_path: {error}"))
             }
-            SurfaceError::Delivery(DeliveryError::ResearchFailed(error)) => Self::Internal(error),
+            SurfaceError::ResearchFailed(error) => Self::Internal(error),
             other => Self::Internal(other.to_string()),
         }
     }
 }
 
 pub async fn research(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<WikiInstance>>,
     Json(req): Json<ResearchRequest>,
 ) -> Result<Json<ResearchResponse>, ApiError> {
     let answer = ResearchSurface::new(state)
@@ -56,12 +57,17 @@ pub async fn research(
 }
 
 pub async fn sync(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<WikiInstance>>,
     Json(req): Json<SyncRequest>,
 ) -> Result<Json<SyncResponse>, ApiError> {
-    ResearchSurface::new(state)
-        .compute_sync(req.files)
+    let published = state
+        .prepare_published_for_read()
         .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let wiki_dir = published.wiki_dir().to_path_buf();
+    tokio::task::spawn_blocking(move || compute_sync(&wiki_dir, &req.files))
+        .await
+        .map_err(|e| ApiError::Internal(format!("{e:#}")))?
         .map(Json)
-        .map_err(ApiError::from)
+        .map_err(|e| ApiError::Internal(format!("{e:#}")))
 }

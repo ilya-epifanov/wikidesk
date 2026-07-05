@@ -6,7 +6,8 @@ use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tracing::{debug, error, instrument};
 
-use super::{AgentProcess, FailureKind, Runner, RunnerError, substitute_prompt};
+use super::process::{AgentProcess, timeout_with_stderr};
+use super::{FailureKind, Runner, RunnerError};
 
 #[derive(Debug, thiserror::Error)]
 enum StreamJsonError {
@@ -108,8 +109,7 @@ impl Runner for StreamJsonRunner {
         working_dir: &Path,
         timeout: Duration,
     ) -> Result<Option<String>, RunnerError> {
-        let args = substitute_prompt(command, prompt);
-        let mut process = AgentProcess::spawn(&args, working_dir)?;
+        let mut process = AgentProcess::spawn(command, prompt, working_dir)?;
         let stdout = process
             .child
             .stdout
@@ -117,18 +117,13 @@ impl Runner for StreamJsonRunner {
             .expect("stdout piped by AgentProcess::spawn");
         let stderr_buf = process.stderr.clone();
 
-        let parse_result =
-            tokio::time::timeout(timeout, parse_stream_json(stdout, &mut process)).await;
-
-        match parse_result {
-            Ok(result) => result,
-            Err(_) => {
-                error!(stderr = %stderr_buf.render(), "agent timed out");
-                Err(RunnerError::Timeout {
-                    secs: timeout.as_secs(),
-                })
-            }
-        }
+        timeout_with_stderr(
+            stderr_buf,
+            timeout,
+            parse_stream_json(stdout, &mut process),
+            "agent timed out",
+        )
+        .await?
     }
 }
 

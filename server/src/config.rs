@@ -1,61 +1,29 @@
 use std::collections::HashSet;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
-use wikidesk_shared::{WikiInfo, derived_wiki_path, is_valid_wiki_name, wiki_base_path};
+use wikidesk_shared::{WikiInfo, derived_wiki_path, wiki_base_path};
 
-use crate::runner::{self, Runner, RunnerType};
+use crate::runner::RunnerType;
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawServerConfig {
-    #[serde(default = "default_bind_address")]
-    bind_address: String,
-    #[serde(default)]
-    wikis: Vec<RawWikiConfig>,
-}
+use normalize::normalize_wiki_config;
+use raw::RawServerConfig;
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawWikiConfig {
-    name: String,
-    description: String,
-    #[serde(default)]
-    runner: RunnerType,
-    agent_command: Vec<String>,
-    prompt_template: PathBuf,
-    #[serde(default)]
-    mcp: RawMcpConfig,
-    #[serde(default = "default_completed_task_ttl_secs")]
-    completed_task_ttl_secs: u64,
-    #[serde(default = "default_agent_timeout_secs")]
-    agent_timeout_secs: u64,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawMcpConfig {
-    instructions: Option<String>,
-    research_tool_description: Option<String>,
-}
-
-fn default_bind_address() -> String {
-    "127.0.0.1:1238".to_string()
-}
-
-fn default_completed_task_ttl_secs() -> u64 {
-    7200
-}
-
-fn default_agent_timeout_secs() -> u64 {
-    1800
-}
+mod normalize;
+mod raw;
 
 pub const QUESTION_PLACEHOLDER: &str = "{question}";
 pub const PROMPT_PLACEHOLDER: &str = "$PROMPT";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VcsWorkflow {
+    #[default]
+    None,
+    Jj,
+}
 
 #[derive(Debug)]
 pub struct ServerConfig {
@@ -71,10 +39,22 @@ pub struct AppConfig {
     pub runner: RunnerType,
     pub agent_command: Vec<String>,
     pub prompt_template_content: String,
+    pub vcs_workflow: VcsWorkflow,
+    pub git_sync: Option<GitSyncConfig>,
     pub mcp_instructions: String,
     pub research_tool_description: String,
     pub completed_task_ttl: Duration,
     pub agent_timeout: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitSyncConfig {
+    pub remote: String,
+    pub interval: Duration,
+    pub retry_max_elapsed: Duration,
+    pub retry_initial_delay: Duration,
+    pub retry_max_delay: Duration,
+    pub ssh_command: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -112,109 +92,27 @@ pub enum ConfigError {
         "agent_command for acp runner in wiki '{0}' must not contain {PROMPT_PLACEHOLDER} (ACP sends prompt via RPC)"
     )]
     AgentCommandUnexpectedPrompt(String),
-}
-
-fn resolve(base: &Path, path: PathBuf) -> PathBuf {
-    if path.is_absolute() {
-        path
-    } else {
-        base.join(path)
-    }
-}
-
-fn wiki_repo_path(config_dir: &Path, name: &str) -> PathBuf {
-    config_dir.join(derived_wiki_path(name))
-}
-
-fn validate_wiki_name(name: &str) -> Result<(), ConfigError> {
-    if is_valid_wiki_name(name) {
-        Ok(())
-    } else {
-        Err(ConfigError::InvalidWikiName(name.to_string()))
-    }
-}
-
-fn validate_description(name: &str, description: &str) -> Result<String, ConfigError> {
-    let description = description.trim();
-    if description.is_empty() {
-        Err(ConfigError::WikiDescriptionEmpty(name.to_string()))
-    } else {
-        Ok(description.to_string())
-    }
-}
-
-fn default_mcp_instructions(description: &str) -> String {
-    format!(
-        "Use this wiki for: {description}\n\nUse research when the existing wiki may not cover the full picture, including adjacent knowledge that may not have been researched yet."
-    )
-}
-
-fn default_research_tool_description(description: &str) -> String {
-    format!("Submit a research question for this wiki. Covers: {description}")
-}
-
-fn validate_agent_command(
-    wiki_name: &str,
-    runner: RunnerType,
-    agent_command: &[String],
-) -> Result<(), ConfigError> {
-    if agent_command.is_empty() {
-        return Err(ConfigError::AgentCommandEmpty(wiki_name.to_string()));
-    }
-    let prompt_count = agent_command
-        .iter()
-        .filter(|a| a.as_str() == PROMPT_PLACEHOLDER)
-        .count();
-    if runner.requires_prompt_placeholder() {
-        if prompt_count != 1 {
-            return Err(ConfigError::AgentCommandMissingPrompt(
-                wiki_name.to_string(),
-            ));
-        }
-    } else if prompt_count != 0 {
-        return Err(ConfigError::AgentCommandUnexpectedPrompt(
-            wiki_name.to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn load_prompt_template(prompt_template: &Path) -> Result<String, ConfigError> {
-    let prompt_template_content = std::fs::read_to_string(prompt_template).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            ConfigError::PromptTemplateMissing(prompt_template.to_path_buf())
-        } else {
-            ConfigError::Io(prompt_template.to_path_buf(), e)
-        }
-    })?;
-    if !prompt_template_content.contains(QUESTION_PLACEHOLDER) {
-        return Err(ConfigError::PromptTemplateMissingPlaceholder(
-            prompt_template.to_path_buf(),
-        ));
-    }
-    Ok(prompt_template_content)
+    #[error("git_sync for wiki '{0}' requires vcs_workflow = \"jj\"")]
+    GitSyncRequiresJj(String),
+    #[error("git_sync remote for wiki '{0}' must not be empty")]
+    GitSyncRemoteEmpty(String),
+    #[error("git_sync interval_secs for wiki '{0}' must be greater than zero")]
+    GitSyncIntervalZero(String),
+    #[error("git_sync retry_max_elapsed_secs for wiki '{0}' must be greater than zero")]
+    GitSyncRetryMaxElapsedZero(String),
+    #[error("git_sync retry_initial_delay_secs for wiki '{0}' must be greater than zero")]
+    GitSyncRetryInitialDelayZero(String),
+    #[error("git_sync retry_max_delay_secs for wiki '{0}' must be greater than zero")]
+    GitSyncRetryMaxDelayZero(String),
 }
 
 impl AppConfig {
-    pub fn wiki_dir(&self) -> PathBuf {
-        self.wiki_repo.join("wiki")
-    }
-
     pub fn base_path(&self) -> String {
         wiki_base_path(&self.name)
     }
 
     pub fn derived_wiki_path(&self) -> String {
         derived_wiki_path(&self.name)
-    }
-
-    pub fn build_research_prompt(&self, question: &str) -> String {
-        self.prompt_template_content
-            .replace(QUESTION_PLACEHOLDER, question)
-    }
-
-    pub fn create_runner_adapter(&self) -> Arc<dyn Runner> {
-        runner::create_runner(self.runner)
     }
 
     pub fn info(&self) -> WikiInfo {
@@ -230,6 +128,24 @@ impl AppConfig {
 
     pub fn research_tool_description(&self) -> &str {
         &self.research_tool_description
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_app_config(wiki_repo: PathBuf, agent_command: Vec<String>) -> AppConfig {
+    AppConfig {
+        name: "test".into(),
+        wiki_repo,
+        description: "Test wiki.".into(),
+        runner: RunnerType::Generic,
+        agent_command,
+        prompt_template_content: "{question}".into(),
+        vcs_workflow: VcsWorkflow::None,
+        git_sync: None,
+        mcp_instructions: "Test instructions.".into(),
+        research_tool_description: "Test research tool.".into(),
+        completed_task_ttl: Duration::from_secs(900),
+        agent_timeout: Duration::from_secs(5),
     }
 }
 
@@ -266,50 +182,7 @@ impl ServerConfig {
         let mut seen = HashSet::new();
         let mut wikis = Vec::with_capacity(raw.wikis.len());
         for raw_wiki in raw.wikis {
-            validate_wiki_name(&raw_wiki.name)?;
-            if !seen.insert(raw_wiki.name.clone()) {
-                return Err(ConfigError::DuplicateWikiName(raw_wiki.name));
-            }
-            let description = validate_description(&raw_wiki.name, &raw_wiki.description)?;
-            validate_agent_command(&raw_wiki.name, raw_wiki.runner, &raw_wiki.agent_command)?;
-
-            let wiki_repo = wiki_repo_path(&config_dir, &raw_wiki.name);
-            if !wiki_repo.is_dir() {
-                return Err(ConfigError::WikiRepoMissing {
-                    name: raw_wiki.name,
-                    path: wiki_repo,
-                });
-            }
-            if !wiki_repo.join("wiki").is_dir() {
-                return Err(ConfigError::WikiDirMissing {
-                    name: raw_wiki.name,
-                    path: wiki_repo.join("wiki"),
-                });
-            }
-            let prompt_template_content =
-                load_prompt_template(&resolve(&config_dir, raw_wiki.prompt_template))?;
-
-            let mcp_instructions = raw_wiki
-                .mcp
-                .instructions
-                .unwrap_or_else(|| default_mcp_instructions(&description));
-            let research_tool_description = raw_wiki
-                .mcp
-                .research_tool_description
-                .unwrap_or_else(|| default_research_tool_description(&description));
-
-            wikis.push(AppConfig {
-                name: raw_wiki.name,
-                wiki_repo,
-                description,
-                runner: raw_wiki.runner,
-                agent_command: raw_wiki.agent_command,
-                prompt_template_content,
-                mcp_instructions,
-                research_tool_description,
-                completed_task_ttl: Duration::from_secs(raw_wiki.completed_task_ttl_secs),
-                agent_timeout: Duration::from_secs(raw_wiki.agent_timeout_secs),
-            });
+            wikis.push(normalize_wiki_config(&config_dir, raw_wiki, &mut seen)?);
         }
 
         Ok(Self { bind_addr, wikis })
@@ -372,7 +245,7 @@ prompt_template = "prompt.md"
             wiki.wiki_repo,
             dir.path().canonicalize().unwrap().join("wiki-rlhf")
         );
-        assert_eq!(wiki.wiki_dir(), wiki.wiki_repo.join("wiki"));
+        assert!(wiki.wiki_repo.join("wiki").is_dir());
         assert_eq!(wiki.base_path(), "/wiki/rlhf");
         assert_eq!(wiki.derived_wiki_path(), "wiki-rlhf");
         assert_eq!(wiki.description, "Test wiki.");
@@ -386,6 +259,89 @@ prompt_template = "prompt.md"
         );
         assert_eq!(wiki.info().description, "Test wiki.");
         assert_eq!(wiki.prompt_template_content, "Research: {question}");
+        assert_eq!(wiki.vcs_workflow, VcsWorkflow::None);
+        assert_eq!(wiki.git_sync, None);
+    }
+
+    #[test]
+    fn loads_jj_vcs_workflow() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_dir(dir.path());
+        let config_path = write_config(
+            dir.path(),
+            r#"
+[[wikis]]
+name = "rlhf"
+description = "Test wiki."
+agent_command = ["echo", "$PROMPT"]
+prompt_template = "prompt.md"
+vcs_workflow = "jj"
+"#,
+        );
+
+        let wiki = load_one(&config_path);
+
+        assert_eq!(wiki.vcs_workflow, VcsWorkflow::Jj);
+    }
+
+    #[test]
+    fn loads_git_sync_for_jj_wiki() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_dir(dir.path());
+        let config_path = write_config(
+            dir.path(),
+            r#"
+[[wikis]]
+name = "rlhf"
+description = "Test wiki."
+agent_command = ["echo", "$PROMPT"]
+prompt_template = "prompt.md"
+vcs_workflow = "jj"
+
+[wikis.git_sync]
+remote = "origin"
+interval_secs = 60
+retry_max_elapsed_secs = 120
+retry_initial_delay_secs = 2
+retry_max_delay_secs = 10
+ssh_command = "ssh -i /run/secrets/wikidesk/rlhf -o IdentitiesOnly=yes"
+"#,
+        );
+
+        let wiki = load_one(&config_path);
+
+        assert_eq!(
+            wiki.git_sync,
+            Some(GitSyncConfig {
+                remote: "origin".into(),
+                interval: Duration::from_secs(60),
+                retry_max_elapsed: Duration::from_secs(120),
+                retry_initial_delay: Duration::from_secs(2),
+                retry_max_delay: Duration::from_secs(10),
+                ssh_command: Some("ssh -i /run/secrets/wikidesk/rlhf -o IdentitiesOnly=yes".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_git_sync_without_jj_workflow() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_dir(dir.path());
+        let config_path = write_config(
+            dir.path(),
+            r#"
+[[wikis]]
+name = "rlhf"
+description = "Test wiki."
+agent_command = ["echo", "$PROMPT"]
+prompt_template = "prompt.md"
+
+[wikis.git_sync]
+"#,
+        );
+
+        let err = ServerConfig::load(&config_path).unwrap_err();
+        assert!(matches!(err, ConfigError::GitSyncRequiresJj(name) if name == "rlhf"));
     }
 
     #[test]

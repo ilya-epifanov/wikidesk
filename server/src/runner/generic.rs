@@ -4,7 +4,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tracing::instrument;
 
-use super::{AgentProcess, Runner, RunnerError, substitute_prompt};
+use super::process::AgentProcess;
+use super::{Runner, RunnerError};
 
 pub struct GenericRunner;
 
@@ -18,17 +19,8 @@ impl Runner for GenericRunner {
         working_dir: &Path,
         timeout: Duration,
     ) -> Result<Option<String>, RunnerError> {
-        let args = substitute_prompt(command, prompt);
-        let process = AgentProcess::spawn(&args, working_dir)?;
-        let stderr_buf = process.stderr.clone();
-        let output = process.wait_for_output(timeout).await?;
-
-        if !output.status.success() {
-            tracing::error!(stderr = %stderr_buf.render(), "agent exited with failure");
-            let exit_code = output.status.code().unwrap_or(-1);
-            return Err(RunnerError::Exited { exit_code });
-        }
-
+        let process = AgentProcess::spawn(command, prompt, working_dir)?;
+        let output = process.wait_for_successful_output(timeout).await?;
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         Ok((!stdout.is_empty()).then_some(stdout))
     }
