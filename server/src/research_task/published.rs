@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::VcsWorkflow;
 
+use super::OperationContext;
 use super::jj;
 use super::jj::command::{Jj, args};
 
@@ -52,13 +53,14 @@ impl PublishedWikiRepo {
 
     pub(super) async fn publish_revision(
         &self,
+        op: OperationContext<'_>,
         workspace: &Path,
         rev: &str,
     ) -> Result<(), jj::Error> {
         let _guard = self.lock.lock().await;
         match self.mode {
             PublishedMode::Plain => Ok(()),
-            PublishedMode::Jj => publish_jj_revision(&self.wiki, &self.repo, workspace, rev).await,
+            PublishedMode::Jj => publish_jj_revision(op, &self.repo, workspace, rev).await,
         }
     }
 
@@ -113,12 +115,12 @@ async fn prepare_jj_published_workspace(wiki: &str, repo: &Path) -> Result<(), j
 }
 
 async fn publish_jj_revision(
-    wiki: &str,
+    op: OperationContext<'_>,
     repo: &Path,
     workspace: &Path,
     rev: &str,
 ) -> Result<(), jj::Error> {
-    ensure_published_clean(wiki, repo).await?;
+    ensure_published_clean(op.wiki, repo).await?;
     let published_jj = Jj::new(repo);
     let old_main = published_jj
         .commit_id("main", "reading main before publish")
@@ -129,26 +131,41 @@ async fn publish_jj_revision(
         .commit_id(rev, "reading revision before publish")
         .await?;
     tracing::info!(
-        wiki = %wiki,
+        wiki = %op.wiki,
         repo = %repo.display(),
         workspace = %workspace.display(),
+        task_id = op.task_id.unwrap_or(""),
+        run_id = op.run_id.unwrap_or(""),
+        remote = op.remote.unwrap_or(""),
         old_main = old_main.as_deref().unwrap_or("<unknown>"),
         new_main = %new_main,
         "publishing jj revision",
     );
     workspace_jj.bookmark_set("main", &new_main).await?;
-    if let Err(err) = prepare_jj_published_workspace(wiki, repo).await {
+    if let Err(err) = prepare_jj_published_workspace(op.wiki, repo).await {
         if let Some(old_main) = old_main
             && let Err(rollback) = workspace_jj.bookmark_set("main", &old_main).await
         {
-            tracing::error!(error = %rollback, "failed to roll back main after publish failure");
+            tracing::error!(
+                wiki = %op.wiki,
+                repo = %repo.display(),
+                workspace = %workspace.display(),
+                task_id = op.task_id.unwrap_or(""),
+                run_id = op.run_id.unwrap_or(""),
+                remote = op.remote.unwrap_or(""),
+                error = %rollback,
+                "failed to roll back main after publish failure",
+            );
         }
         return Err(err);
     }
     tracing::info!(
-        wiki = %wiki,
+        wiki = %op.wiki,
         repo = %repo.display(),
         workspace = %workspace.display(),
+        task_id = op.task_id.unwrap_or(""),
+        run_id = op.run_id.unwrap_or(""),
+        remote = op.remote.unwrap_or(""),
         old_main = old_main.as_deref().unwrap_or("<unknown>"),
         new_main = %new_main,
         "published jj revision",

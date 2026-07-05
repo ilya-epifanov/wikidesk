@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio::time::Instant;
+use tracing::Instrument;
 
 use crate::config::AppConfig;
 use crate::queue::{QueueFullError, TaskQueue, TaskStatus};
@@ -99,6 +100,8 @@ impl WikiInstance {
                 return;
             }
         };
+        let title = research_task::question_title(&question);
+        tracing::Span::current().record("question", tracing::field::display(&title));
         tracing::info!(wiki = %self.config.name, task_id = %task_id, "research started");
         let started = Instant::now();
         let status = self.run_task(&task_id, &question).await;
@@ -143,7 +146,7 @@ impl WikiInstance {
         self.remote_sync
             .run_loop(
                 &self.config.name,
-                || self.executor.sync_remote_once(),
+                |run_id| async move { self.executor.sync_remote_once(&run_id).await },
                 research_task::Error::is_retryable_remote_sync,
             )
             .await;
@@ -168,7 +171,13 @@ pub async fn run_remote_sync_loop(state: Arc<WikiInstance>) {
 
 pub async fn run_worker(state: Arc<WikiInstance>, mut rx: mpsc::Receiver<String>) {
     while let Some(task_id) = rx.recv().await {
-        tokio::spawn(state.clone().execute_queued_task(task_id));
+        let span = tracing::info_span!(
+            "research_task",
+            wiki = %state.config.name,
+            task_id = %task_id,
+            question = tracing::field::Empty,
+        );
+        tokio::spawn(state.clone().execute_queued_task(task_id).instrument(span));
     }
 }
 

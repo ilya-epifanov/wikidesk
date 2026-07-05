@@ -6,11 +6,13 @@ use std::path::{Path, PathBuf};
 use crate::config::GitSyncConfig;
 use crate::runner::{ConfiguredAgentRunner, RunnerError};
 
-use super::{PublishedWikiRepo, question_title};
+use super::{OperationContext, PublishedWikiRepo, question_title};
 use command::Jj;
+use tracing::Instrument;
 use workspace::{OwnedWorkspace, is_wikidesk_workspace, remove_dir_if_exists, workspace_root};
 
 pub struct Workflow {
+    wiki: String,
     wiki_repo: PathBuf,
 }
 
@@ -58,8 +60,8 @@ impl Error {
 }
 
 impl Workflow {
-    pub fn new(wiki_repo: PathBuf) -> Self {
-        Self { wiki_repo }
+    pub fn new(wiki: String, wiki_repo: PathBuf) -> Self {
+        Self { wiki, wiki_repo }
     }
 
     pub async fn prepare_startup(&self, published: &PublishedWikiRepo) -> Result<(), Error> {
@@ -84,9 +86,10 @@ impl Workflow {
     ) -> Result<String, Error> {
         published.prepare().await?;
 
+        let op = OperationContext::research(&self.wiki, &self.wiki_repo, task_id);
         let mut tx = JjTransaction::new(&self.wiki_repo);
         let result = self
-            .run_research_inner(published, agent, prompt, task_id, question, &mut tx)
+            .run_research_inner(op, published, agent, prompt, question, &mut tx)
             .await;
         tx.cleanup().await;
         result
@@ -97,10 +100,12 @@ impl Workflow {
         published: &PublishedWikiRepo,
         agent: &ConfiguredAgentRunner,
         sync: &GitSyncConfig,
+        run_id: &str,
     ) -> Result<(), Error> {
+        let op = OperationContext::remote_sync(&self.wiki, &self.wiki_repo, run_id, &sync.remote);
         let mut tx = JjTransaction::new(&self.wiki_repo);
         let result = self
-            .sync_remote_inner(published, agent, sync, &mut tx)
+            .sync_remote_inner(op, published, agent, sync, &mut tx)
             .await;
         tx.cleanup().await;
         result
@@ -108,13 +113,14 @@ impl Workflow {
 
     async fn run_research_inner(
         &self,
+        op: OperationContext<'_>,
         published: &PublishedWikiRepo,
         agent: &ConfiguredAgentRunner,
         prompt: &str,
-        task_id: &str,
         question: &str,
         tx: &mut JjTransaction<'_>,
     ) -> Result<String, Error> {
+        let task_id = op.task_id.expect("research context carries task_id");
         let research = tx.research_workspace(task_id).await?;
 
         let answer = agent
@@ -127,7 +133,8 @@ impl Workflow {
         let diff_summary = research_jj.diff_summary().await?;
         if diff_summary.trim().is_empty() {
             tracing::info!(
-                repo = %self.wiki_repo.display(),
+                wiki = %op.wiki,
+                repo = %op.repo.display(),
                 task_id = %task_id,
                 "research produced no repo changes; leaving main unchanged",
             );
@@ -135,7 +142,8 @@ impl Workflow {
             return Ok(answer);
         }
         tracing::info!(
-            repo = %self.wiki_repo.display(),
+            wiki = %op.wiki,
+            repo = %op.repo.display(),
             task_id = %task_id,
             diff_summary = %diff_summary.trim(),
             "research produced repo changes",
@@ -155,41 +163,60 @@ impl Workflow {
             .await?;
 
         if main == research_parent {
-            published.publish_revision(&research.path, "@").await?;
+            tracing::info!(
+                wiki = %op.wiki,
+                repo = %op.repo.display(),
+                workspace = %research.path.display(),
+                task_id = %task_id,
+                "publishing research as fast-forward",
+            );
+            published
+                .publish_revision(op, &research.path, "@")
+                .instrument(publish_span(op, &research.path))
+                .await?;
             return Ok(answer);
         }
 
         let merge_revs = ["main".to_string(), research_rev];
+        let merge_workspace = OwnedWorkspace::merge(&self.wiki_repo, task_id);
         tx.publish_resolved_merge(
             published,
             agent,
-            OwnedWorkspace::merge(&self.wiki_repo, task_id),
-            &merge_revs,
-            |conflicts| merge_prompt(task_id, question, conflicts),
-            |notes| merge_message(task_id, notes),
+            MergeRequest {
+                op,
+                workspace: merge_workspace.clone(),
+                revs: &merge_revs,
+                kind: MergeKind::Research { task_id, question },
+            },
         )
+        .instrument(merge_span(op, &merge_workspace.path))
         .await?;
         Ok(answer)
     }
 
     async fn sync_remote_inner(
         &self,
+        op: OperationContext<'_>,
         published: &PublishedWikiRepo,
         agent: &ConfiguredAgentRunner,
         sync: &GitSyncConfig,
         tx: &mut JjTransaction<'_>,
     ) -> Result<(), Error> {
-        self.fetch_and_integrate_remote(published, agent, sync, tx)
+        self.fetch_and_integrate_remote(op, published, agent, sync, tx)
             .await?;
         tracing::info!(
-            repo = %self.wiki_repo.display(),
+            wiki = %op.wiki,
+            repo = %op.repo.display(),
             remote = %sync.remote,
+            run_id = op.run_id.unwrap_or(""),
             "pushing jj main to git remote",
         );
         Jj::new(&self.wiki_repo).git_push_main(sync).await?;
         tracing::info!(
-            repo = %self.wiki_repo.display(),
+            wiki = %op.wiki,
+            repo = %op.repo.display(),
             remote = %sync.remote,
+            run_id = op.run_id.unwrap_or(""),
             "pushed jj main to git remote",
         );
         Ok(())
@@ -197,6 +224,7 @@ impl Workflow {
 
     async fn fetch_and_integrate_remote(
         &self,
+        op: OperationContext<'_>,
         published: &PublishedWikiRepo,
         agent: &ConfiguredAgentRunner,
         sync: &GitSyncConfig,
@@ -209,14 +237,18 @@ impl Workflow {
             .await
             .ok();
         tracing::info!(
-            repo = %self.wiki_repo.display(),
+            wiki = %op.wiki,
+            repo = %op.repo.display(),
             remote = %sync.remote,
+            run_id = op.run_id.unwrap_or(""),
             "fetching jj git remote",
         );
         jj.git_fetch(sync).await?;
         tracing::info!(
-            repo = %self.wiki_repo.display(),
+            wiki = %op.wiki,
+            repo = %op.repo.display(),
             remote = %sync.remote,
+            run_id = op.run_id.unwrap_or(""),
             "fetched jj git remote",
         );
         let current_main = jj
@@ -233,8 +265,10 @@ impl Workflow {
             let head = &main_revs[0];
             if current_main.as_ref() != Some(head) {
                 tracing::info!(
-                    repo = %self.wiki_repo.display(),
+                    wiki = %op.wiki,
+                    repo = %op.repo.display(),
                     remote = %sync.remote,
+                    run_id = op.run_id.unwrap_or(""),
                     old_main = current_main.as_deref().unwrap_or("<unknown>"),
                     new_main = %head,
                     "updating main after remote fetch",
@@ -243,13 +277,15 @@ impl Workflow {
             }
         } else {
             tracing::warn!(
-                repo = %self.wiki_repo.display(),
+                wiki = %op.wiki,
+                repo = %op.repo.display(),
                 remote = %sync.remote,
+                run_id = op.run_id.unwrap_or(""),
                 head_count = main_revs.len(),
                 "remote sync found divergent main heads; merging",
             );
-            rollback_main(&jj, old_main.as_deref()).await;
-            self.merge_remote_heads(published, agent, sync, tx, &main_revs)
+            rollback_main(&jj, op, old_main.as_deref()).await;
+            self.merge_remote_heads(op, published, agent, sync, tx, &main_revs)
                 .await?;
         }
         published.prepare().await?;
@@ -258,27 +294,36 @@ impl Workflow {
 
     async fn merge_remote_heads(
         &self,
+        op: OperationContext<'_>,
         published: &PublishedWikiRepo,
         agent: &ConfiguredAgentRunner,
         sync: &GitSyncConfig,
         tx: &mut JjTransaction<'_>,
         main_revs: &[String],
     ) -> Result<(), Error> {
-        let run_id = uuid::Uuid::new_v4().to_string();
         tracing::info!(
-            repo = %self.wiki_repo.display(),
+            wiki = %op.wiki,
+            repo = %op.repo.display(),
             remote = %sync.remote,
+            run_id = op.run_id.unwrap_or(""),
             head_count = main_revs.len(),
             "merging remote main divergence",
         );
+        let workspace =
+            OwnedWorkspace::remote_sync(&self.wiki_repo, op.run_id.unwrap_or("unknown"));
         tx.publish_resolved_merge(
             published,
             agent,
-            OwnedWorkspace::remote_sync(&self.wiki_repo, &run_id),
-            main_revs,
-            |conflicts| remote_sync_prompt(&sync.remote, conflicts),
-            |notes| remote_sync_message(&sync.remote, notes),
+            MergeRequest {
+                op,
+                workspace: workspace.clone(),
+                revs: main_revs,
+                kind: MergeKind::RemoteSync {
+                    remote: &sync.remote,
+                },
+            },
         )
+        .instrument(merge_span(op, &workspace.path))
         .await
     }
 
@@ -296,6 +341,35 @@ impl Workflow {
 struct JjTransaction<'a> {
     wiki_repo: &'a Path,
     cleanup: Vec<OwnedWorkspace>,
+}
+
+#[derive(Clone, Copy)]
+enum MergeKind<'a> {
+    Research { task_id: &'a str, question: &'a str },
+    RemoteSync { remote: &'a str },
+}
+
+impl MergeKind<'_> {
+    fn message(self, notes: Option<&str>) -> String {
+        match self {
+            Self::Research { task_id, .. } => merge_message(task_id, notes),
+            Self::RemoteSync { remote } => remote_sync_message(remote, notes),
+        }
+    }
+
+    fn prompt(self, conflicts: &str) -> String {
+        match self {
+            Self::Research { task_id, question } => merge_prompt(task_id, question, conflicts),
+            Self::RemoteSync { remote } => remote_sync_prompt(remote, conflicts),
+        }
+    }
+}
+
+struct MergeRequest<'a> {
+    op: OperationContext<'a>,
+    workspace: OwnedWorkspace,
+    revs: &'a [String],
+    kind: MergeKind<'a>,
 }
 
 impl<'a> JjTransaction<'a> {
@@ -318,18 +392,26 @@ impl<'a> JjTransaction<'a> {
         &mut self,
         published: &PublishedWikiRepo,
         agent: &ConfiguredAgentRunner,
-        workspace: OwnedWorkspace,
-        revs: &[String],
-        prompt: impl FnOnce(&str) -> String,
-        resolved_message: impl Fn(Option<&str>) -> String,
+        request: MergeRequest<'_>,
     ) -> Result<(), Error> {
+        let MergeRequest {
+            op,
+            workspace,
+            revs,
+            kind,
+        } = request;
         let workspace = self.prepare(workspace).await?;
-        let message = resolved_message(None);
+        let message = kind.message(None);
+        tracing::info!("creating jj merge workspace");
         workspace
             .create_merge_revs(self.wiki_repo, revs, &message)
             .await?;
-        resolve_conflicts(agent, &workspace.path, prompt, resolved_message).await?;
-        published.publish_revision(&workspace.path, "@").await
+        tracing::info!("created jj merge workspace");
+        resolve_conflicts(op, agent, &workspace.path, kind).await?;
+        published
+            .publish_revision(op, &workspace.path, "@")
+            .instrument(publish_span(op, &workspace.path))
+            .await
     }
 
     async fn prepare(&mut self, workspace: OwnedWorkspace) -> Result<OwnedWorkspace, Error> {
@@ -345,37 +427,84 @@ impl<'a> JjTransaction<'a> {
     }
 }
 
-async fn rollback_main(jj: &Jj<'_>, old_main: Option<&str>) {
+fn merge_span(op: OperationContext<'_>, workspace: &Path) -> tracing::Span {
+    tracing::info_span!(
+        "jj_merge",
+        wiki = %op.wiki,
+        repo = %op.repo.display(),
+        workspace = %workspace.display(),
+        task_id = op.task_id.unwrap_or(""),
+        run_id = op.run_id.unwrap_or(""),
+        remote = op.remote.unwrap_or(""),
+    )
+}
+
+fn publish_span(op: OperationContext<'_>, workspace: &Path) -> tracing::Span {
+    tracing::info_span!(
+        "jj_publish",
+        wiki = %op.wiki,
+        repo = %op.repo.display(),
+        workspace = %workspace.display(),
+        task_id = op.task_id.unwrap_or(""),
+        run_id = op.run_id.unwrap_or(""),
+        remote = op.remote.unwrap_or(""),
+    )
+}
+
+async fn rollback_main(jj: &Jj<'_>, op: OperationContext<'_>, old_main: Option<&str>) {
     let Some(old_main) = old_main else {
         return;
     };
     if let Err(error) = jj.bookmark_set("main", old_main).await {
-        tracing::error!(error = %error, "failed to roll back main after remote sync failure");
+        tracing::error!(
+            wiki = %op.wiki,
+            repo = %op.repo.display(),
+            run_id = op.run_id.unwrap_or(""),
+            remote = op.remote.unwrap_or(""),
+            error = %error,
+            "failed to roll back main after remote sync failure",
+        );
     }
 }
 
 async fn resolve_conflicts(
+    op: OperationContext<'_>,
     agent: &ConfiguredAgentRunner,
     workspace: &Path,
-    prompt: impl FnOnce(&str) -> String,
-    message: impl FnOnce(Option<&str>) -> String,
+    kind: MergeKind<'_>,
 ) -> Result<(), Error> {
     let jj = Jj::new(workspace);
     let conflicts = jj.unresolved_conflicts().await?;
     if conflicts.trim().is_empty() {
+        tracing::info!("jj merge has no conflicts");
         return Ok(());
     }
+    tracing::warn!(
+        conflicts = %conflicts.trim(),
+        "jj merge conflicts found; starting resolver",
+    );
     let notes = agent
-        .run(&prompt(&conflicts), workspace)
+        .run(&kind.prompt(&conflicts), workspace)
         .await?
         .unwrap_or_default();
+    tracing::info!(notes_bytes = notes.len(), "jj merge resolver completed");
     jj.snapshot().await?;
     let remaining = jj.unresolved_conflicts().await?;
     if !remaining.trim().is_empty() {
+        tracing::warn!(
+            wiki = %op.wiki,
+            repo = %op.repo.display(),
+            workspace = %workspace.display(),
+            task_id = op.task_id.unwrap_or(""),
+            run_id = op.run_id.unwrap_or(""),
+            remote = op.remote.unwrap_or(""),
+            conflicts = %remaining.trim(),
+            "jj merge conflicts remain after resolver",
+        );
         return Err(Error::UnresolvedConflicts { files: remaining });
     }
     if !notes.trim().is_empty() {
-        jj.describe(&message(Some(&notes))).await?;
+        jj.describe(&kind.message(Some(&notes))).await?;
     }
     Ok(())
 }

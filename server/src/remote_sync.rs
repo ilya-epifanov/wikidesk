@@ -3,6 +3,7 @@ use std::future::Future;
 
 use tokio::sync::{Mutex, Notify};
 use tokio::time::Instant;
+use tracing::Instrument;
 
 use crate::config::GitSyncConfig;
 
@@ -38,7 +39,7 @@ impl RemoteSync {
         should_retry: fn(&E) -> bool,
     ) where
         E: Display,
-        F: FnMut() -> Fut,
+        F: FnMut(String) -> Fut,
         Fut: Future<Output = Result<(), E>>,
     {
         let Some(sync) = &self.config else {
@@ -50,45 +51,59 @@ impl RemoteSync {
                 _ = interval.tick() => "interval",
                 _ = self.trigger.notified() => "request",
             };
-            tracing::info!(
+            let run_id = uuid::Uuid::new_v4().to_string();
+            let span = tracing::info_span!(
+                "remote_sync",
                 wiki = %wiki,
                 remote = %sync.remote,
+                run_id = %run_id,
                 reason = %reason,
-                "remote sync started",
             );
-            let started = Instant::now();
-            match self
-                .run_with_retry(sync, &mut sync_once, should_retry)
-                .await
-            {
-                Ok(()) => tracing::info!(
-                    wiki = %wiki,
-                    remote = %sync.remote,
-                    reason = %reason,
-                    duration_ms = started.elapsed().as_millis(),
-                    "remote sync completed",
-                ),
-                Err(error) => tracing::error!(
-                    wiki = %wiki,
-                    remote = %sync.remote,
-                    reason = %reason,
-                    duration_ms = started.elapsed().as_millis(),
-                    error = %format!("{error:#}"),
-                    "remote sync failed",
-                ),
-            }
+            self.run_once_logged(sync, &run_id, &mut sync_once, should_retry)
+                .instrument(span)
+                .await;
+        }
+    }
+
+    async fn run_once_logged<E, F, Fut>(
+        &self,
+        sync: &GitSyncConfig,
+        run_id: &str,
+        sync_once: &mut F,
+        should_retry: fn(&E) -> bool,
+    ) where
+        E: Display,
+        F: FnMut(String) -> Fut,
+        Fut: Future<Output = Result<(), E>>,
+    {
+        tracing::info!("remote sync started");
+        let started = Instant::now();
+        match self
+            .run_with_retry(sync, run_id, sync_once, should_retry)
+            .await
+        {
+            Ok(()) => tracing::info!(
+                duration_ms = started.elapsed().as_millis(),
+                "remote sync completed",
+            ),
+            Err(error) => tracing::error!(
+                duration_ms = started.elapsed().as_millis(),
+                error = %format!("{error:#}"),
+                "remote sync failed",
+            ),
         }
     }
 
     async fn run_with_retry<E, F, Fut>(
         &self,
         sync: &GitSyncConfig,
+        run_id: &str,
         sync_once: &mut F,
         should_retry: fn(&E) -> bool,
     ) -> Result<(), E>
     where
         E: Display,
-        F: FnMut() -> Fut,
+        F: FnMut(String) -> Fut,
         Fut: Future<Output = Result<(), E>>,
     {
         let _sync = self.lock.lock().await;
@@ -96,7 +111,7 @@ impl RemoteSync {
         let mut attempt = 1;
         let mut delay = sync.retry_initial_delay;
         loop {
-            match sync_once().await {
+            match sync_once(run_id.to_string()).await {
                 Ok(()) => return Ok(()),
                 Err(error) if should_retry(&error) => {
                     let elapsed = started.elapsed();
@@ -145,7 +160,7 @@ mod tests {
         let remote = RemoteSync::new(Some(test_config()));
         let sync = remote.config.as_ref().unwrap();
         let mut attempts = 0;
-        let mut sync_once = || {
+        let mut sync_once = |_run_id: String| {
             attempts += 1;
             let attempt = attempts;
             async move {
@@ -158,11 +173,38 @@ mod tests {
         };
 
         remote
-            .run_with_retry(sync, &mut sync_once, |_| true)
+            .run_with_retry(sync, "run-1", &mut sync_once, |_| true)
             .await
             .unwrap();
 
         assert_eq!(attempts, 3);
+    }
+
+    #[tokio::test]
+    async fn run_with_retry_reuses_run_id_for_retries() {
+        let remote = RemoteSync::new(Some(test_config()));
+        let sync = remote.config.as_ref().unwrap();
+        let mut attempts = 0;
+        let mut run_ids = Vec::new();
+        let mut sync_once = |run_id: String| {
+            attempts += 1;
+            run_ids.push(run_id);
+            let attempt = attempts;
+            async move {
+                if attempt < 2 {
+                    Err("transient")
+                } else {
+                    Ok(())
+                }
+            }
+        };
+
+        remote
+            .run_with_retry(sync, "same-run", &mut sync_once, |_| true)
+            .await
+            .unwrap();
+
+        assert_eq!(run_ids, ["same-run", "same-run"]);
     }
 
     #[tokio::test]
@@ -179,7 +221,7 @@ mod tests {
             let active = active.clone();
             let max_active = max_active.clone();
             tasks.push(tokio::spawn(async move {
-                let mut sync_once = || {
+                let mut sync_once = |_run_id: String| {
                     let active = active.clone();
                     let max_active = max_active.clone();
                     async move {
@@ -191,7 +233,7 @@ mod tests {
                     }
                 };
                 remote
-                    .run_with_retry(&sync, &mut sync_once, |_| true)
+                    .run_with_retry(&sync, "run-1", &mut sync_once, |_| true)
                     .await
                     .unwrap();
             }));

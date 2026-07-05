@@ -1,6 +1,8 @@
 mod jj;
 mod published;
 
+use std::path::Path;
+
 use crate::config::{AppConfig, GitSyncConfig, QUESTION_PLACEHOLDER, VcsWorkflow};
 use crate::runner::{ConfiguredAgentRunner, RunnerError};
 
@@ -49,7 +51,10 @@ impl Executor {
             git_sync: config.git_sync.clone(),
             workflow: match config.vcs_workflow {
                 VcsWorkflow::None => Workflow::None,
-                VcsWorkflow::Jj => Workflow::Jj(jj::Workflow::new(config.wiki_repo.clone())),
+                VcsWorkflow::Jj => Workflow::Jj(jj::Workflow::new(
+                    config.name.clone(),
+                    config.wiki_repo.clone(),
+                )),
             },
             published: PublishedWikiRepo::new(
                 config.name.clone(),
@@ -70,12 +75,12 @@ impl Executor {
         }
     }
 
-    pub async fn sync_remote_once(&self) -> Result<(), Error> {
+    pub async fn sync_remote_once(&self, run_id: &str) -> Result<(), Error> {
         let (Workflow::Jj(workflow), Some(sync)) = (&self.workflow, &self.git_sync) else {
             return Ok(());
         };
         Ok(workflow
-            .sync_remote_once(&self.published, &self.agent, sync)
+            .sync_remote_once(&self.published, &self.agent, sync, run_id)
             .await?)
     }
 
@@ -99,6 +104,42 @@ impl Executor {
             .run(prompt, self.published.wiki_repo())
             .await?
             .ok_or(Error::AgentNoOutput)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct OperationContext<'a> {
+    pub(crate) wiki: &'a str,
+    pub(crate) repo: &'a Path,
+    pub(crate) task_id: Option<&'a str>,
+    pub(crate) run_id: Option<&'a str>,
+    pub(crate) remote: Option<&'a str>,
+}
+
+impl<'a> OperationContext<'a> {
+    pub(crate) fn research(wiki: &'a str, repo: &'a Path, task_id: &'a str) -> Self {
+        Self {
+            wiki,
+            repo,
+            task_id: Some(task_id),
+            run_id: None,
+            remote: None,
+        }
+    }
+
+    pub(crate) fn remote_sync(
+        wiki: &'a str,
+        repo: &'a Path,
+        run_id: &'a str,
+        remote: &'a str,
+    ) -> Self {
+        Self {
+            wiki,
+            repo,
+            task_id: None,
+            run_id: Some(run_id),
+            remote: Some(remote),
+        }
     }
 }
 
