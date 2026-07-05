@@ -45,24 +45,43 @@ impl RemoteSync {
         let Some(sync) = &self.config else {
             return;
         };
+        self.run_for_reason(wiki, sync, "startup", &mut sync_once, should_retry)
+            .await;
+
         let mut interval = tokio::time::interval_at(Instant::now() + sync.interval, sync.interval);
         loop {
             let reason = tokio::select! {
                 _ = interval.tick() => "interval",
                 _ = self.trigger.notified() => "request",
             };
-            let run_id = uuid::Uuid::new_v4().to_string();
-            let span = tracing::info_span!(
-                "remote_sync",
-                wiki = %wiki,
-                remote = %sync.remote,
-                run_id = %run_id,
-                reason = %reason,
-            );
-            self.run_once_logged(sync, &run_id, &mut sync_once, should_retry)
-                .instrument(span)
+            self.run_for_reason(wiki, sync, reason, &mut sync_once, should_retry)
                 .await;
         }
+    }
+
+    async fn run_for_reason<E, F, Fut>(
+        &self,
+        wiki: &str,
+        sync: &GitSyncConfig,
+        reason: &str,
+        sync_once: &mut F,
+        should_retry: fn(&E) -> bool,
+    ) where
+        E: Display,
+        F: FnMut(String) -> Fut,
+        Fut: Future<Output = Result<(), E>>,
+    {
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let span = tracing::info_span!(
+            "remote_sync",
+            wiki = %wiki,
+            remote = %sync.remote,
+            run_id = %run_id,
+            reason = %reason,
+        );
+        self.run_once_logged(sync, &run_id, sync_once, should_retry)
+            .instrument(span)
+            .await;
     }
 
     async fn run_once_logged<E, F, Fut>(
@@ -153,6 +172,35 @@ mod tests {
             retry_max_delay: Duration::from_millis(1),
             ssh_command: None,
         }
+    }
+
+    #[tokio::test]
+    async fn run_loop_syncs_immediately_on_startup() {
+        let remote = Arc::new(RemoteSync::new(Some(test_config())));
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut tx = Some(tx);
+        let task = tokio::spawn(async move {
+            remote
+                .run_loop(
+                    "wiki",
+                    move |run_id| {
+                        if let Some(tx) = tx.take() {
+                            let _ = tx.send(run_id);
+                        }
+                        async { Ok::<(), &'static str>(()) }
+                    },
+                    |_| true,
+                )
+                .await;
+        });
+
+        let run_id = tokio::time::timeout(Duration::from_millis(100), rx)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(!run_id.is_empty());
+        task.abort();
     }
 
     #[tokio::test]
