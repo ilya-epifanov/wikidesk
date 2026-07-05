@@ -4,6 +4,7 @@
 
 - **wiki** — the `wiki/` content root inside a wiki repo that agents read directly.
 - **wiki repo** — the operator-owned repository directory that contains LLM-wiki files such as `index.md`, `log.md`, and the `wiki/` content root. It defaults to `wiki-{wiki name}`, except the special wiki name `default` uses `wiki`.
+- **published wiki repo** — the server-side wiki repo state that clients are allowed to sync from; in VCS-backed workflows, only this published state is exposed to client mirrors.
 - **client mirror** — the consumer-side local copy or read-only mount of a wiki content root; it defaults to `wiki-{wiki name}`, except `default` uses `wiki`, and each client may override it with `name:local/path`.
 - **agent setup prompt** — generated instructions that tell a coding agent how to configure a consumer repository for wikidesk.
 - **wiki instance** — one independently configured wiki repo served by wikidesk, with its own queue, runner, prompt, and client-facing instructions.
@@ -15,5 +16,6 @@
 - **research task** — the queued lifecycle of a research question, from submission through running, completion, failure, and expiry.
 - **agent runner** — the mechanism that invokes an external research agent and extracts its answer.
 - **sync** — the server-to-client process that makes a local wiki mirror the server wiki.
+- **remote sync** — the optional background process that fetches from and pushes a published wiki repo to its configured Git remote; clients keep reading the local published wiki repo while remote sync is pending or failed.
 - **wikilink** — a `[[Page]]` or `[[Page|display]]` reference in a research answer that is resolved to a wiki file path.
 - **configuration** — the validated startup inputs for the server: wiki instances, bind address, runner choices, agent commands, timeouts, and exposed instructions.

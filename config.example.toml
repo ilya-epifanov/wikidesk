@@ -46,6 +46,21 @@ agent_command = ["claude", "-p", "$PROMPT", "--dangerously-skip-permissions"]
 # Maximum time an agent command may run before being killed (seconds, default: 1800)
 # agent_timeout_secs = 1800
 
+# Optional VCS isolation workflow (default: "none").
+# "jj" requires this wiki repo to be a jj workspace with a main bookmark.
+# Research runs in temporary wikidesk-owned jj workspaces and is merged into main before clients can sync it.
+# vcs_workflow = "none"
+
+# Optional scheduled Git remote sync for jj-backed wiki repos.
+# Research completion wakes the same loop; research responses do not wait for GitHub push.
+# [wikis.git_sync]
+# remote = "origin"
+# interval_secs = 3600
+# retry_max_elapsed_secs = 900
+# retry_initial_delay_secs = 5
+# retry_max_delay_secs = 60
+# ssh_command = "ssh -i /run/secrets/wikidesk/rlhf_deploy_key -o IdentitiesOnly=yes"
+
 # Path to the prompt template file, relative to this config file (must contain a {question} placeholder).
 # Keep this outside the wiki repo's wiki/ content root so the research agent cannot edit its own prompt.
 prompt_template = "prompts/rlhf.md"
