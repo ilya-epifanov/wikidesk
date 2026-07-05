@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/ilya-epifanov/wikidesk/compare/wikidesk-shared-v0.2.0...wikidesk-shared-v0.3.0) - 2026-07-05
+
+### Added
+
+- add jj-backed research execution
+
+### Other
+
+- improve wikidesk operational logging
+- mark jj workflow done
+
 ## [0.2.0](https://github.com/ilya-epifanov/wikidesk/compare/wikidesk-shared-v0.1.2...wikidesk-shared-v0.2.0) - 2026-07-02
 
 ### Added
