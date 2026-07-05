@@ -46,15 +46,36 @@ impl RemoteSync {
         };
         let mut interval = tokio::time::interval_at(Instant::now() + sync.interval, sync.interval);
         loop {
-            tokio::select! {
-                _ = interval.tick() => {}
-                _ = self.trigger.notified() => {}
-            }
-            if let Err(error) = self
+            let reason = tokio::select! {
+                _ = interval.tick() => "interval",
+                _ = self.trigger.notified() => "request",
+            };
+            tracing::info!(
+                wiki = %wiki,
+                remote = %sync.remote,
+                reason = %reason,
+                "remote sync started",
+            );
+            let started = Instant::now();
+            match self
                 .run_with_retry(sync, &mut sync_once, should_retry)
                 .await
             {
-                tracing::error!(wiki, error = %format!("{error:#}"), "remote sync failed");
+                Ok(()) => tracing::info!(
+                    wiki = %wiki,
+                    remote = %sync.remote,
+                    reason = %reason,
+                    duration_ms = started.elapsed().as_millis(),
+                    "remote sync completed",
+                ),
+                Err(error) => tracing::error!(
+                    wiki = %wiki,
+                    remote = %sync.remote,
+                    reason = %reason,
+                    duration_ms = started.elapsed().as_millis(),
+                    error = %format!("{error:#}"),
+                    "remote sync failed",
+                ),
             }
         }
     }

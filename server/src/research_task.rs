@@ -51,7 +51,11 @@ impl Executor {
                 VcsWorkflow::None => Workflow::None,
                 VcsWorkflow::Jj => Workflow::Jj(jj::Workflow::new(config.wiki_repo.clone())),
             },
-            published: PublishedWikiRepo::new(config.wiki_repo.clone(), config.vcs_workflow),
+            published: PublishedWikiRepo::new(
+                config.name.clone(),
+                config.wiki_repo.clone(),
+                config.vcs_workflow,
+            ),
         }
     }
 
@@ -98,6 +102,23 @@ impl Executor {
     }
 }
 
+pub(crate) fn question_title(question: &str) -> String {
+    let compacted = question
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or(question)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut chars = compacted.chars();
+    let title = chars.by_ref().take(80).collect::<String>();
+    if chars.next().is_some() {
+        format!("{title}…")
+    } else {
+        title
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,7 +126,8 @@ mod tests {
 
     #[tokio::test]
     async fn plain_published_repo_guard_exposes_paths() {
-        let published = PublishedWikiRepo::new(PathBuf::from("/tmp/wiki"), VcsWorkflow::None);
+        let published =
+            PublishedWikiRepo::new("test".into(), PathBuf::from("/tmp/wiki"), VcsWorkflow::None);
         let guard = published.prepare().await.unwrap();
 
         assert_eq!(guard.wiki_dir(), Path::new("/tmp/wiki/wiki"));

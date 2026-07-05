@@ -36,10 +36,6 @@ impl<'a> Jj<'a> {
         Ok(())
     }
 
-    pub(in crate::research_task) async fn has_changes(&self) -> Result<bool, Error> {
-        Ok(!self.diff_summary().await?.trim().is_empty())
-    }
-
     pub(in crate::research_task) async fn diff_summary(&self) -> Result<String, Error> {
         self.run(args(["diff", "--summary", "-r", "@"])).await
     }

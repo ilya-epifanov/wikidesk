@@ -55,7 +55,15 @@ impl WikiInstance {
     }
 
     pub async fn enqueue(&self, question: String) -> Result<String, QueueFullError> {
-        self.queue.enqueue(question).await
+        let title = research_task::question_title(&question);
+        let task_id = self.queue.enqueue(question).await?;
+        tracing::info!(
+            wiki = %self.config.name,
+            task_id = %task_id,
+            question = %title,
+            "research queued",
+        );
+        Ok(task_id)
     }
 
     pub async fn get_task_status(&self, id: &str) -> Option<TaskStatus> {
@@ -82,9 +90,35 @@ impl WikiInstance {
         let _permit = self.research_semaphore.acquire().await.unwrap();
         let question = match self.queue.start(&task_id).await {
             Some(q) => q,
-            None => return,
+            None => {
+                tracing::warn!(
+                    wiki = %self.config.name,
+                    task_id = %task_id,
+                    "queued research task disappeared before start",
+                );
+                return;
+            }
         };
+        tracing::info!(wiki = %self.config.name, task_id = %task_id, "research started");
+        let started = Instant::now();
         let status = self.run_task(&task_id, &question).await;
+        match &status {
+            TaskStatus::Done { answer } => tracing::info!(
+                wiki = %self.config.name,
+                task_id = %task_id,
+                duration_ms = started.elapsed().as_millis(),
+                answer_bytes = answer.len(),
+                "research completed",
+            ),
+            TaskStatus::Failed { error } => tracing::warn!(
+                wiki = %self.config.name,
+                task_id = %task_id,
+                duration_ms = started.elapsed().as_millis(),
+                error = %error,
+                "research failed",
+            ),
+            TaskStatus::Queued | TaskStatus::Running => {}
+        }
         let should_sync = matches!(&status, TaskStatus::Done { .. });
         self.queue.finish(&task_id, status).await;
         if should_sync {

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::config::GitSyncConfig;
 use crate::runner::{ConfiguredAgentRunner, RunnerError};
 
-use super::PublishedWikiRepo;
+use super::{PublishedWikiRepo, question_title};
 use command::Jj;
 use workspace::{OwnedWorkspace, is_wikidesk_workspace, remove_dir_if_exists, workspace_root};
 
@@ -124,10 +124,22 @@ impl Workflow {
 
         let research_jj = Jj::new(&research.path);
         research_jj.snapshot().await?;
-        if !research_jj.has_changes().await? {
+        let diff_summary = research_jj.diff_summary().await?;
+        if diff_summary.trim().is_empty() {
+            tracing::info!(
+                repo = %self.wiki_repo.display(),
+                task_id = %task_id,
+                "research produced no repo changes; leaving main unchanged",
+            );
             published.prepare().await?;
             return Ok(answer);
         }
+        tracing::info!(
+            repo = %self.wiki_repo.display(),
+            task_id = %task_id,
+            diff_summary = %diff_summary.trim(),
+            "research produced repo changes",
+        );
 
         research_jj
             .describe(&research_message(task_id, question))
@@ -169,7 +181,18 @@ impl Workflow {
     ) -> Result<(), Error> {
         self.fetch_and_integrate_remote(published, agent, sync, tx)
             .await?;
-        Jj::new(&self.wiki_repo).git_push_main(sync).await
+        tracing::info!(
+            repo = %self.wiki_repo.display(),
+            remote = %sync.remote,
+            "pushing jj main to git remote",
+        );
+        Jj::new(&self.wiki_repo).git_push_main(sync).await?;
+        tracing::info!(
+            repo = %self.wiki_repo.display(),
+            remote = %sync.remote,
+            "pushed jj main to git remote",
+        );
+        Ok(())
     }
 
     async fn fetch_and_integrate_remote(
@@ -185,7 +208,17 @@ impl Workflow {
             .commit_id("main", "reading main before remote fetch")
             .await
             .ok();
+        tracing::info!(
+            repo = %self.wiki_repo.display(),
+            remote = %sync.remote,
+            "fetching jj git remote",
+        );
         jj.git_fetch(sync).await?;
+        tracing::info!(
+            repo = %self.wiki_repo.display(),
+            remote = %sync.remote,
+            "fetched jj git remote",
+        );
         let current_main = jj
             .commit_id("main", "reading main after remote fetch")
             .await
@@ -199,9 +232,22 @@ impl Workflow {
         if main_revs.len() == 1 {
             let head = &main_revs[0];
             if current_main.as_ref() != Some(head) {
+                tracing::info!(
+                    repo = %self.wiki_repo.display(),
+                    remote = %sync.remote,
+                    old_main = current_main.as_deref().unwrap_or("<unknown>"),
+                    new_main = %head,
+                    "updating main after remote fetch",
+                );
                 jj.bookmark_set("main", head).await?;
             }
         } else {
+            tracing::warn!(
+                repo = %self.wiki_repo.display(),
+                remote = %sync.remote,
+                head_count = main_revs.len(),
+                "remote sync found divergent main heads; merging",
+            );
             rollback_main(&jj, old_main.as_deref()).await;
             self.merge_remote_heads(published, agent, sync, tx, &main_revs)
                 .await?;
@@ -219,6 +265,12 @@ impl Workflow {
         main_revs: &[String],
     ) -> Result<(), Error> {
         let run_id = uuid::Uuid::new_v4().to_string();
+        tracing::info!(
+            repo = %self.wiki_repo.display(),
+            remote = %sync.remote,
+            head_count = main_revs.len(),
+            "merging remote main divergence",
+        );
         tx.publish_resolved_merge(
             published,
             agent,
@@ -373,23 +425,6 @@ Conflicted files:\n{conflicts}"
 
 fn remote_heads_revset(remote: &str) -> String {
     format!("heads(main | main@{remote})")
-}
-
-fn question_title(question: &str) -> String {
-    let compacted = question
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or(question)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let mut chars = compacted.chars();
-    let title = chars.by_ref().take(80).collect::<String>();
-    if chars.next().is_some() {
-        format!("{title}…")
-    } else {
-        title
-    }
 }
 
 #[cfg(test)]

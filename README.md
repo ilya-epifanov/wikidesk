@@ -302,6 +302,16 @@ This also provides sandboxing for the research agent.
 
 </details>
 
+### Logging
+
+wikidesk logs to stderr and defaults to `info`. Use `RUST_LOG` for more detail:
+
+```sh
+RUST_LOG=wikidesk_server=debug,warn wikidesk-server --config config.toml
+```
+
+For systemd, add `Environment=RUST_LOG=wikidesk_server=debug,warn` under `[Service]`. For launchd, add the same variable to the plist environment.
+
 ## Consumer workspace setup
 
 HTTP paths are:
