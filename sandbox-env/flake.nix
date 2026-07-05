@@ -52,6 +52,7 @@
             ast-grep
             ripgrep
             git
+            jujutsu
             cacert
             jq
             curl

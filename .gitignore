@@ -5,3 +5,4 @@ sandbox.toml
 env.sh
 /wiki
 .npm-cache/
+/tmp/
