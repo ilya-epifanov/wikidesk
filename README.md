@@ -549,7 +549,7 @@ The ACP runner passes the wiki repo as the working directory, so `claude-agent-a
 
 - [ ] Add simple UI for monitoring research request queues
 - [x] Manage multiple wikis, expose at different base HTTP contexts
-- [ ] Add an optional simple fixed git workflow: `git add .` → ask agent to commit in a loop until fixed point → `git push` (optional)
+- [x] Add an optional `jj` workflow with isolated research workspaces and async Git remote sync
 - [x] Support Claude's streaming-json output mode, ACP for better progress monitoring
 
 ## See also
