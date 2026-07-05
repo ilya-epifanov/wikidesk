@@ -102,14 +102,7 @@ impl<'a> Jj<'a> {
             sync.ssh_command.as_deref(),
         )
         .await?;
-        self.run(args([
-            "bookmark",
-            "track",
-            "main",
-            "--remote",
-            sync.remote.as_str(),
-        ]))
-        .await?;
+        self.run(bookmark_track_args(&sync.remote)).await?;
         Ok(())
     }
 
@@ -177,6 +170,10 @@ pub(in crate::research_task) fn os(arg: &str) -> OsString {
     OsString::from(arg)
 }
 
+fn bookmark_track_args(remote: &str) -> [OsString; 3] {
+    [os("bookmark"), os("track"), os(&format!("main@{remote}"))]
+}
+
 fn one_line(ids: Vec<String>, op: &'static str) -> Result<String, Error> {
     if ids.len() == 1 {
         return Ok(ids.into_iter().next().unwrap());
@@ -192,4 +189,23 @@ fn display_args(args: &[OsString]) -> String {
         .map(|arg| arg.to_string_lossy())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn display(args: &[OsString]) -> Vec<String> {
+        args.iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn bookmark_track_uses_remote_bookmark_syntax() {
+        assert_eq!(
+            display(&bookmark_track_args("origin")),
+            ["bookmark", "track", "main@origin"]
+        );
+    }
 }
