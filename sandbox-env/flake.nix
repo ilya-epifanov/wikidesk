@@ -48,6 +48,7 @@
             llm-agents-pkgs.claude-code
             llm-agents-pkgs.claude-agent-acp
             llm-agents-pkgs.pi
+            llm-agents-pkgs.codex
 
             ast-grep
             ripgrep
