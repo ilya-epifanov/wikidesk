@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use directories::ProjectDirs;
+
 use super::Error;
 use super::command::{Jj, os};
 
@@ -112,10 +114,17 @@ pub(super) fn workspace_root(wiki_repo: &Path) -> PathBuf {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("wiki");
-    wiki_repo
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(format!(".wikidesk-{name}-workspaces"))
+    workspace_data_root().join(format!("{name}-workspaces"))
+}
+
+fn workspace_data_root() -> PathBuf {
+    ProjectDirs::from("", "", "wikidesk")
+        .map(|dirs| {
+            dirs.runtime_dir()
+                .unwrap_or_else(|| dirs.cache_dir())
+                .join(".workspaces")
+        })
+        .unwrap_or_else(|| std::env::temp_dir().join("wikidesk").join(".workspaces"))
 }
 
 #[cfg(test)]
@@ -129,10 +138,10 @@ mod tests {
     }
 
     #[test]
-    fn workspace_root_stays_outside_published_repo() {
+    fn workspace_root_uses_per_user_wikidesk_directory() {
         assert_eq!(
-            workspace_root(Path::new("/tmp/wiki-rlhf")),
-            PathBuf::from("/tmp/.wikidesk-wiki-rlhf-workspaces")
+            workspace_root(Path::new("/published/wiki-rlhf")),
+            workspace_data_root().join("wiki-rlhf-workspaces")
         );
     }
 }
