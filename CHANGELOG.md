@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3](https://github.com/ilya-epifanov/wikidesk/compare/wikidesk-shared-v0.3.2...wikidesk-shared-v0.3.3) - 2026-07-14
+
+### Added
+
+- run jj research concurrently
+
 ## [0.3.2](https://github.com/ilya-epifanov/wikidesk/compare/v0.3.0...v0.3.2) - 2026-07-11
 
 ### Other
