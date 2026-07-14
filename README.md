@@ -496,6 +496,7 @@ ln -s /mnt/c/path/to/wiki-rlhf/wiki ./wiki-rlhf
 | `[wikis.mcp].research_tool_description` | derived from `description` | Custom description for the `research` MCP tool |
 | `[[wikis]].completed_task_ttl_secs` | `7200` | How long to keep completed task results (seconds) |
 | `[[wikis]].agent_timeout_secs` | `1800` | Maximum time an agent may run before being killed (seconds) |
+| `[[wikis]].research_concurrency` | `1` | Maximum concurrent research agents. Only valid when `vcs_workflow` is not `none`; publishing remains serialized. |
 
 ### Runner types
 

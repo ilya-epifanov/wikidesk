@@ -14,6 +14,7 @@ use workspace::{OwnedWorkspace, is_wikidesk_workspace, remove_dir_if_exists, wor
 pub struct Workflow {
     wiki: String,
     wiki_repo: PathBuf,
+    integration_lock: tokio::sync::Mutex<()>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -61,7 +62,11 @@ impl Error {
 
 impl Workflow {
     pub fn new(wiki: String, wiki_repo: PathBuf) -> Self {
-        Self { wiki, wiki_repo }
+        Self {
+            wiki,
+            wiki_repo,
+            integration_lock: tokio::sync::Mutex::new(()),
+        }
     }
 
     pub async fn prepare_startup(&self, published: &PublishedWikiRepo) -> Result<(), Error> {
@@ -102,6 +107,7 @@ impl Workflow {
         sync: &GitSyncConfig,
         run_id: &str,
     ) -> Result<(), Error> {
+        let _integration = self.integration_lock.lock().await;
         let op = OperationContext::remote_sync(&self.wiki, &self.wiki_repo, run_id, &sync.remote);
         let mut tx = JjTransaction::new(&self.wiki_repo);
         let result = self
@@ -158,6 +164,7 @@ impl Workflow {
         let research_parent = research_jj
             .commit_id("@-", "reading research parent id")
             .await?;
+        let _integration = self.integration_lock.lock().await;
         let main = Jj::new(&self.wiki_repo)
             .commit_id("main", "reading main bookmark")
             .await?;

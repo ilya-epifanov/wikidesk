@@ -41,6 +41,21 @@ impl<'a> Jj<'a> {
     }
 
     pub(in crate::research_task) async fn unresolved_conflicts(&self) -> Result<String, Error> {
+        if self
+            .run(args([
+                "log",
+                "--no-graph",
+                "-r",
+                "conflicts() & @",
+                "-T",
+                "commit_id",
+            ]))
+            .await?
+            .trim()
+            .is_empty()
+        {
+            return Ok(String::new());
+        }
         self.run(args(["resolve", "--list"])).await
     }
 

@@ -51,6 +51,10 @@ agent_command = ["claude", "-p", "$PROMPT", "--dangerously-skip-permissions"]
 # Research runs in temporary wikidesk-owned jj workspaces and is merged into main before clients can sync it.
 # vcs_workflow = "none"
 
+# Maximum concurrent research agents (default: 1).
+# Only valid when vcs_workflow is not "none"; integration into the published wiki remains serialized.
+# research_concurrency = 4
+
 # Optional scheduled Git remote sync for jj-backed wiki repos.
 # Research completion wakes the same loop; research responses do not wait for GitHub push.
 # [wikis.git_sync]

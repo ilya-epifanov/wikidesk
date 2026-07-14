@@ -27,17 +27,15 @@ impl std::fmt::Debug for WikiInstance {
 }
 
 impl WikiInstance {
-    const MAX_CONCURRENT_RESEARCH: usize = 1;
-
     pub fn new(config: AppConfig) -> (Self, mpsc::Receiver<String>) {
         let (queue, rx) = TaskQueue::new();
         let executor = research_task::Executor::new(&config);
         let remote_sync = RemoteSync::new(config.git_sync.clone());
         (
             Self {
+                research_semaphore: tokio::sync::Semaphore::new(config.research_concurrency.get()),
                 config,
                 executor,
-                research_semaphore: tokio::sync::Semaphore::new(Self::MAX_CONCURRENT_RESEARCH),
                 queue,
                 remote_sync,
             },
@@ -184,11 +182,99 @@ pub async fn run_worker(state: Arc<WikiInstance>, mut rx: mpsc::Receiver<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::num::NonZeroUsize;
+    use std::path::Path;
+    use std::process::Command;
+
     fn test_state() -> (WikiInstance, mpsc::Receiver<String>) {
         WikiInstance::new(crate::config::test_app_config(
             "/tmp/nonexistent".into(),
             vec!["echo".into(), "$PROMPT".into()],
         ))
+    }
+
+    fn run_jj(repo: &Path, args: &[&str]) {
+        let output = Command::new("jj")
+            .arg("-R")
+            .arg(repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "jj failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires jj CLI"]
+    async fn configured_research_runs_concurrently_without_losing_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let coordination = dir.path().join("coordination");
+        std::fs::create_dir_all(repo.join("wiki")).unwrap();
+        std::fs::create_dir(&coordination).unwrap();
+        std::fs::write(repo.join("wiki/index.md"), "# Index\n").unwrap();
+        let output = Command::new("jj")
+            .args(["git", "init"])
+            .arg(&repo)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        run_jj(&repo, &["describe", "-m", "initial"]);
+        run_jj(&repo, &["bookmark", "create", "main", "-r", "@"]);
+        run_jj(&repo, &["new", "main"]);
+
+        let script = r#"set -eu
+touch "$0/$1.started"
+while [ "$(find "$0" -name '*.started' | wc -l)" -lt 2 ]; do sleep 0.01; done
+printf '# %s\n' "$1" > "wiki/$1.md"
+printf '%s answer\n' "$1"
+"#;
+        let mut config = crate::config::test_app_config(
+            repo.clone(),
+            vec![
+                "sh".into(),
+                "-c".into(),
+                script.into(),
+                coordination.to_string_lossy().into_owned(),
+                crate::config::PROMPT_PLACEHOLDER.into(),
+            ],
+        );
+        config.vcs_workflow = crate::config::VcsWorkflow::Jj;
+        config.research_concurrency = NonZeroUsize::new(2).unwrap();
+        config.agent_timeout = Duration::from_secs(2);
+
+        let (state, rx) = WikiInstance::new(config);
+        let state = Arc::new(state);
+        state.prepare_executor().await.unwrap();
+        let worker = tokio::spawn(run_worker(state.clone(), rx));
+        let first = state.enqueue("first".into()).await.unwrap();
+        let second = state.enqueue("second".into()).await.unwrap();
+        let (first, second) = tokio::join!(
+            state.wait_for_result(&first),
+            state.wait_for_result(&second)
+        );
+
+        assert!(
+            matches!(first, Some(TaskStatus::Done { .. })),
+            "first task: {first:?}"
+        );
+        assert!(
+            matches!(second, Some(TaskStatus::Done { .. })),
+            "second task: {second:?}"
+        );
+        let published = state.prepare_published_for_read().await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(published.wiki_dir().join("first.md")).unwrap(),
+            "# first\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(published.wiki_dir().join("second.md")).unwrap(),
+            "# second\n"
+        );
+        worker.abort();
     }
 
     #[tokio::test]

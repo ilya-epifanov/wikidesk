@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -114,6 +115,20 @@ fn validate_git_sync(
     }))
 }
 
+fn validate_research_concurrency(
+    wiki_name: &str,
+    workflow: VcsWorkflow,
+    raw: Option<usize>,
+) -> Result<NonZeroUsize, ConfigError> {
+    if raw.is_some() && workflow == VcsWorkflow::None {
+        return Err(ConfigError::ResearchConcurrencyRequiresVcs(
+            wiki_name.to_string(),
+        ));
+    }
+    NonZeroUsize::new(raw.unwrap_or(1))
+        .ok_or_else(|| ConfigError::ResearchConcurrencyZero(wiki_name.to_string()))
+}
+
 fn nonempty_trimmed<'a>(
     value: &'a str,
     wiki_name: &str,
@@ -167,6 +182,7 @@ pub(super) fn normalize_wiki_config(
         agent_command,
         prompt_template,
         vcs_workflow,
+        research_concurrency,
         mcp,
         git_sync,
         completed_task_ttl_secs,
@@ -179,6 +195,8 @@ pub(super) fn normalize_wiki_config(
     }
     let description = validate_description(&name, &description)?;
     validate_agent_command(&name, runner, &agent_command)?;
+    let research_concurrency =
+        validate_research_concurrency(&name, vcs_workflow, research_concurrency)?;
     let git_sync = validate_git_sync(&name, vcs_workflow, git_sync)?;
 
     let wiki_repo = wiki_repo_path(config_dir, &name);
@@ -211,6 +229,7 @@ pub(super) fn normalize_wiki_config(
         agent_command,
         prompt_template_content,
         vcs_workflow,
+        research_concurrency,
         git_sync,
         mcp_instructions,
         research_tool_description,

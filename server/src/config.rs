@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -40,6 +41,7 @@ pub struct AppConfig {
     pub agent_command: Vec<String>,
     pub prompt_template_content: String,
     pub vcs_workflow: VcsWorkflow,
+    pub research_concurrency: NonZeroUsize,
     pub git_sync: Option<GitSyncConfig>,
     pub mcp_instructions: String,
     pub research_tool_description: String,
@@ -94,6 +96,10 @@ pub enum ConfigError {
     AgentCommandUnexpectedPrompt(String),
     #[error("git_sync for wiki '{0}' requires vcs_workflow = \"jj\"")]
     GitSyncRequiresJj(String),
+    #[error("research_concurrency for wiki '{0}' must be greater than zero")]
+    ResearchConcurrencyZero(String),
+    #[error("research_concurrency for wiki '{0}' requires vcs_workflow != \"none\"")]
+    ResearchConcurrencyRequiresVcs(String),
     #[error("git_sync remote for wiki '{0}' must not be empty")]
     GitSyncRemoteEmpty(String),
     #[error("git_sync interval_secs for wiki '{0}' must be greater than zero")]
@@ -141,6 +147,7 @@ pub(crate) fn test_app_config(wiki_repo: PathBuf, agent_command: Vec<String>) ->
         agent_command,
         prompt_template_content: "{question}".into(),
         vcs_workflow: VcsWorkflow::None,
+        research_concurrency: NonZeroUsize::MIN,
         git_sync: None,
         mcp_instructions: "Test instructions.".into(),
         research_tool_description: "Test research tool.".into(),
@@ -260,6 +267,7 @@ prompt_template = "prompt.md"
         assert_eq!(wiki.info().description, "Test wiki.");
         assert_eq!(wiki.prompt_template_content, "Research: {question}");
         assert_eq!(wiki.vcs_workflow, VcsWorkflow::None);
+        assert_eq!(wiki.research_concurrency, NonZeroUsize::MIN);
         assert_eq!(wiki.git_sync, None);
     }
 
@@ -282,6 +290,77 @@ vcs_workflow = "jj"
         let wiki = load_one(&config_path);
 
         assert_eq!(wiki.vcs_workflow, VcsWorkflow::Jj);
+    }
+
+    #[test]
+    fn loads_research_concurrency_for_jj_workflow() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_dir(dir.path());
+        let config_path = write_config(
+            dir.path(),
+            r#"
+[[wikis]]
+name = "rlhf"
+description = "Test wiki."
+agent_command = ["echo", "$PROMPT"]
+prompt_template = "prompt.md"
+vcs_workflow = "jj"
+research_concurrency = 3
+"#,
+        );
+
+        let wiki = load_one(&config_path);
+
+        assert_eq!(wiki.research_concurrency.get(), 3);
+    }
+
+    #[test]
+    fn rejects_research_concurrency_without_vcs_workflow() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_dir(dir.path());
+        let config_path = write_config(
+            dir.path(),
+            r#"
+[[wikis]]
+name = "rlhf"
+description = "Test wiki."
+agent_command = ["echo", "$PROMPT"]
+prompt_template = "prompt.md"
+research_concurrency = 2
+"#,
+        );
+
+        let err = ServerConfig::load(&config_path).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ConfigError::ResearchConcurrencyRequiresVcs(name) if name == "rlhf"
+        ));
+    }
+
+    #[test]
+    fn rejects_zero_research_concurrency() {
+        let dir = tempfile::tempdir().unwrap();
+        setup_dir(dir.path());
+        let config_path = write_config(
+            dir.path(),
+            r#"
+[[wikis]]
+name = "rlhf"
+description = "Test wiki."
+agent_command = ["echo", "$PROMPT"]
+prompt_template = "prompt.md"
+vcs_workflow = "jj"
+research_concurrency = 0
+"#,
+        );
+
+        let err = ServerConfig::load(&config_path).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ConfigError::ResearchConcurrencyZero(name) if name == "rlhf"
+        ));
     }
 
     #[test]

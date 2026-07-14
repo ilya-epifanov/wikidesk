@@ -26,6 +26,7 @@ pub(super) struct RawWikiConfig {
     pub(super) prompt_template: PathBuf,
     #[serde(default)]
     pub(super) vcs_workflow: VcsWorkflow,
+    pub(super) research_concurrency: Option<usize>,
     #[serde(default)]
     pub(super) mcp: RawMcpConfig,
     pub(super) git_sync: Option<RawGitSyncConfig>,
