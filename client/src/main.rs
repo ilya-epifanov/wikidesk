@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use serde::de::DeserializeOwned;
 use wikidesk_shared::sync::{
     FileEntry, SyncRequest, SyncResponse, SyncSummary, ensure_local_mirror_safe,
     snapshot_local_mirror,
@@ -148,14 +149,13 @@ impl HttpTransport {
     }
 
     async fn list_wikis(&self) -> anyhow::Result<ListWikisResponse> {
-        Ok(self
-            .client
-            .get(format!("{}{}", self.server_url, WIKI_LIST_PATH))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?)
+        decode_json(
+            self.client
+                .get(format!("{}{}", self.server_url, WIKI_LIST_PATH))
+                .send()
+                .await?,
+        )
+        .await
     }
 
     async fn research(
@@ -164,39 +164,53 @@ impl HttpTransport {
         local_path: &str,
         question: String,
     ) -> anyhow::Result<ResearchResponse> {
-        Ok(self
-            .client
-            .post(format!(
-                "{}{}/api/research",
-                self.server_url,
-                wiki_base_path(wiki)
-            ))
-            .json(&ResearchRequest {
-                question,
-                local_path: Some(local_path.to_string()),
-            })
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?)
+        decode_json(
+            self.client
+                .post(format!(
+                    "{}{}/api/research",
+                    self.server_url,
+                    wiki_base_path(wiki)
+                ))
+                .json(&ResearchRequest {
+                    question,
+                    local_path: Some(local_path.to_string()),
+                })
+                .send()
+                .await?,
+        )
+        .await
     }
 
     async fn sync(&self, wiki: &str, files: Vec<FileEntry>) -> anyhow::Result<SyncResponse> {
-        Ok(self
-            .client
-            .post(format!(
-                "{}{}/api/sync",
-                self.server_url,
-                wiki_base_path(wiki)
-            ))
-            .json(&SyncRequest { files })
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?)
+        decode_json(
+            self.client
+                .post(format!(
+                    "{}{}/api/sync",
+                    self.server_url,
+                    wiki_base_path(wiki)
+                ))
+                .json(&SyncRequest { files })
+                .send()
+                .await?,
+        )
+        .await
     }
+}
+
+async fn decode_json<T>(response: reqwest::Response) -> anyhow::Result<T>
+where
+    T: DeserializeOwned,
+{
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response.json().await?);
+    }
+    let url = response.url().clone();
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|error| format!("<failed to read response body: {error}>"));
+    anyhow::bail!("wikidesk server returned {status} for {url}: {body}")
 }
 
 async fn render_agent_setup(
